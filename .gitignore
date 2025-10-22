@@ -22,3 +22,26 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Chess engines and tools
+BayesElo/
+Stockfish/
+lc0/
+
+# Model checkpoints (except download.sh)
+checkpoints/*
+!checkpoints/download.sh
+
+# Temporary data files
+data/train/
+data/test/
+data/*_results.txt
+data/*_comparison.json
+data/*_games.pgn

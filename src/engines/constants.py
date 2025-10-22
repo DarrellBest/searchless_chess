@@ -112,6 +112,67 @@ def _build_neural_engine(
   )
 
 
+def _build_selfplay_engine(base_model: str, iteration: int):
+  """Builds a selfplay-trained neural engine.
+
+  Args:
+    base_model: Base model name (e.g., '9M', '136M', '270M').
+    iteration: Training iteration checkpoint to load.
+
+  Returns:
+    Neural engine with selfplay-trained parameters.
+  """
+  model_name = f'{base_model}_selfplay'
+
+  # Same architecture as base model
+  if base_model == '9M':
+    num_layers, embedding_dim, num_heads = 8, 256, 8
+  elif base_model == '136M':
+    num_layers, embedding_dim, num_heads = 8, 1024, 8
+  else:  # 270M
+    num_layers, embedding_dim, num_heads = 16, 1024, 8
+
+  num_return_buckets = 128
+  predictor_config = transformer.TransformerConfig(
+      vocab_size=utils.NUM_ACTIONS,
+      output_size=num_return_buckets,
+      pos_encodings=transformer.PositionalEncodings.LEARNED,
+      max_sequence_length=tokenizer.SEQUENCE_LENGTH + 2,
+      num_heads=num_heads,
+      num_layers=num_layers,
+      embedding_dim=embedding_dim,
+      apply_post_ln=True,
+      apply_qk_layernorm=False,
+      use_causal_mask=False,
+  )
+
+  predictor = transformer.build_transformer_predictor(config=predictor_config)
+  checkpoint_dir = os.path.join(os.getcwd(), f'../checkpoints/{model_name}')
+
+  # Load from specific iteration, use EMA params
+  params = training_utils.load_parameters(
+      checkpoint_dir=checkpoint_dir,
+      params=predictor.initial_params(
+          rng=jrandom.PRNGKey(1),
+          targets=np.ones((1, 1), dtype=np.uint32),
+      ),
+      step=iteration,
+      use_ema_params=True,
+  )
+
+  _, return_buckets_values = utils.get_uniform_buckets_edges_values(
+      num_return_buckets
+  )
+  return neural_engines.ActionValueEngine(
+      return_buckets_values=return_buckets_values,
+      predict_fn=neural_engines.wrap_predict_fn(
+          predictor=predictor,
+          params=params,
+          batch_size=1,
+      ),
+  )
+
+
 ENGINE_BUILDERS = {
     'local': functools.partial(_build_neural_engine, model_name='local'),
     '9M': functools.partial(
@@ -123,6 +184,10 @@ ENGINE_BUILDERS = {
     '270M': functools.partial(
         _build_neural_engine, model_name='270M', checkpoint_step=6_400_000
     ),
+    # Selfplay-trained models (use latest iteration by default)
+    '9M_selfplay': lambda: _build_selfplay_engine('9M', iteration=4),
+    '136M_selfplay': lambda: _build_selfplay_engine('136M', iteration=1),
+    '270M_selfplay': lambda: _build_selfplay_engine('270M', iteration=1),
     'stockfish': lambda: stockfish_engine.StockfishEngine(
         limit=chess.engine.Limit(time=0.05)
     ),
