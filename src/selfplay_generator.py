@@ -43,6 +43,7 @@ class SelfPlayGenerator:
       max_moves_per_game: int = 200,
       temperature: float = 1.0,
       reward_scaling: float = 0.01,
+      game_outcome_weight: float = 0.1,
   ):
     """Initializes the self-play generator.
 
@@ -52,6 +53,7 @@ class SelfPlayGenerator:
       max_moves_per_game: Maximum moves before declaring a draw.
       temperature: Temperature for move sampling (0.0 = greedy).
       reward_scaling: Scaling factor for centipawn rewards (default 0.01).
+      game_outcome_weight: Weight for final game outcome (default 0.1).
     """
     self.neural_engine = neural_engine
     self.stockfish_engine = stockfish_engine.StockfishEngine(
@@ -60,6 +62,7 @@ class SelfPlayGenerator:
     self.max_moves_per_game = max_moves_per_game
     self.temperature = temperature
     self.reward_scaling = reward_scaling
+    self.game_outcome_weight = game_outcome_weight
 
   def _get_stockfish_score(self, board: chess.Board) -> float:
     """Gets the Stockfish score for a position (in centipawns).
@@ -117,8 +120,10 @@ class SelfPlayGenerator:
       score_after = self._get_stockfish_score(board)
 
       # Reward is the improvement in position
-      # Note: score_after is from opponent's perspective, so we negate it
-      reward = (score_before + score_after) * self.reward_scaling
+      # score_before is from our perspective, score_after is from opponent's perspective
+      # So improvement = -score_after - score_before
+      # Example: before=+100 (up 1 pawn), after=-200 (opp down 2 pawns) -> improvement = 200-100 = +100
+      reward = (-score_after - score_before) * self.reward_scaling
 
       # Store experience (will update game_outcome at end)
       experiences.append(
@@ -130,27 +135,52 @@ class SelfPlayGenerator:
           )
       )
 
-    # Determine final game outcome
+    # Determine final game outcome from White's and Black's perspectives
     if board.is_checkmate():
       # The side to move lost
-      game_outcome = 0.0
+      if board.turn == chess.WHITE:
+        # White is checkmated, Black won
+        white_outcome = 0.0
+        black_outcome = 1.0
+      else:
+        # Black is checkmated, White won
+        white_outcome = 1.0
+        black_outcome = 0.0
     elif board.is_stalemate() or board.can_claim_draw():
-      game_outcome = 0.5
+      white_outcome = 0.5
+      black_outcome = 0.5
     else:
       # Use final evaluation to determine outcome
       final_score = self._get_stockfish_score(board)
       if abs(final_score) > 300:  # Clear advantage
-        game_outcome = 1.0 if final_score > 0 else 0.0
+        if final_score > 0:
+          # Side to move has advantage
+          if board.turn == chess.WHITE:
+            white_outcome = 1.0
+            black_outcome = 0.0
+          else:
+            white_outcome = 0.0
+            black_outcome = 1.0
+        else:
+          # Side to move is losing
+          if board.turn == chess.WHITE:
+            white_outcome = 0.0
+            black_outcome = 1.0
+          else:
+            white_outcome = 1.0
+            black_outcome = 0.0
       else:
-        game_outcome = 0.5
+        white_outcome = 0.5
+        black_outcome = 0.5
 
-    # Propagate game outcome backwards with alternating perspective
+    # Propagate game outcome backwards based on which side made each move
     for i in range(len(experiences)):
-      # Alternate perspective for each move
+      # i=0,2,4,... are White's moves (even indices)
+      # i=1,3,5,... are Black's moves (odd indices)
       if i % 2 == 0:
-        experiences[i].game_outcome = game_outcome
+        experiences[i].game_outcome = white_outcome
       else:
-        experiences[i].game_outcome = 1.0 - game_outcome
+        experiences[i].game_outcome = black_outcome
 
     return experiences
 
@@ -199,8 +229,9 @@ class SelfPlayGenerator:
         sequence = np.concatenate([exp.tokenized_fen, action, dummy_return])
         sequences.append(sequence)
 
-        # Combined reward: immediate + final outcome
-        total_reward = exp.reward + exp.game_outcome
+        # Combined reward: immediate centipawn change + weighted final outcome
+        # This balances learning from position evaluation vs game result
+        total_reward = exp.reward + self.game_outcome_weight * exp.game_outcome
         rewards.append(total_reward)
 
       sequences = np.stack(sequences).astype(np.int32)

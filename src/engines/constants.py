@@ -185,7 +185,7 @@ ENGINE_BUILDERS = {
         _build_neural_engine, model_name='270M', checkpoint_step=6_400_000
     ),
     # Selfplay-trained models (use latest iteration by default)
-    '9M_selfplay': lambda: _build_selfplay_engine('9M', iteration=4),
+    '9M_selfplay': lambda: _build_selfplay_engine('9M', iteration=1),
     '136M_selfplay': lambda: _build_selfplay_engine('136M', iteration=1),
     '270M_selfplay': lambda: _build_selfplay_engine('270M', iteration=1),
     'stockfish': lambda: stockfish_engine.StockfishEngine(

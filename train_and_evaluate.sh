@@ -11,9 +11,9 @@ NUM_ITERATIONS=10
 GAMES_PER_ITERATION=20
 BATCH_SIZE=32
 LEARNING_RATE=0.0001
-GRADIENT_STEPS=100
-STOCKFISH_TIME=0.01
-NUM_PUZZLES=100
+GRADIENT_STEPS=50
+STOCKFISH_TIME=0.1
+EVAL_PUZZLES=100
 SKIP_BASELINE=false
 RESUME=false
 
@@ -76,12 +76,12 @@ while [[ $# -gt 0 ]]; do
       STOCKFISH_TIME="$2"
       shift 2
       ;;
-    --num_puzzles=*)
-      NUM_PUZZLES="${1#*=}"
+    --eval_puzzles=*)
+      EVAL_PUZZLES="${1#*=}"
       shift
       ;;
-    --num_puzzles)
-      NUM_PUZZLES="$2"
+    --eval_puzzles)
+      EVAL_PUZZLES="$2"
       shift 2
       ;;
     --skip_baseline)
@@ -101,15 +101,15 @@ while [[ $# -gt 0 ]]; do
       echo "  --games_per_iteration N    Self-play games per iteration [default: 20]"
       echo "  --batch_size N             Training batch size [default: 32]"
       echo "  --learning_rate LR         Learning rate [default: 0.0001]"
-      echo "  --gradient_steps N         Gradient steps per iteration [default: 100]"
-      echo "  --stockfish_time TIME      Stockfish time per position [default: 0.01]"
-      echo "  --num_puzzles N            Puzzles for evaluation [default: 100]"
+      echo "  --gradient_steps N         Gradient steps per iteration [default: 50]"
+      echo "  --stockfish_time TIME      Stockfish time per position in seconds [default: 0.1]"
+      echo "  --eval_puzzles N           Puzzles evaluated at each iteration [default: 100]"
       echo "  --skip_baseline            Skip baseline evaluation (if already done)"
       echo "  --resume                   Resume training from latest checkpoint"
       echo "  --help                     Show this help message"
       echo ""
       echo "Example:"
-      echo "  $0 --base_model=9M --num_iterations=5 --num_puzzles=50"
+      echo "  $0 --base_model=9M --num_iterations=5 --eval_puzzles=50"
       exit 0
       ;;
     *)
@@ -133,7 +133,7 @@ echo "  Batch Size: $BATCH_SIZE"
 echo "  Learning Rate: $LEARNING_RATE"
 echo "  Gradient Steps: $GRADIENT_STEPS"
 echo "  Stockfish Time: $STOCKFISH_TIME"
-echo "  Evaluation Puzzles: $NUM_PUZZLES"
+echo "  Evaluation Puzzles per Iteration: $EVAL_PUZZLES"
 echo "  Resume from checkpoint: $RESUME"
 echo ""
 
@@ -157,7 +157,7 @@ if [ "$SKIP_BASELINE" = false ]; then
   echo "Evaluating base model: $BASE_MODEL"
   echo ""
 
-  python puzzles.py --agent=$BASE_MODEL --num_puzzles=$NUM_PUZZLES > ../data/${BASE_MODEL}_baseline_results.txt
+  python puzzles.py --agent=$BASE_MODEL --num_puzzles=$EVAL_PUZZLES > ../data/${BASE_MODEL}_baseline_results.txt
 
   echo "Baseline evaluation complete!"
   echo "Results saved to: ../data/${BASE_MODEL}_baseline_results.txt"
@@ -182,7 +182,8 @@ TRAIN_CMD="python selfplay_train.py \
   --batch_size=$BATCH_SIZE \
   --learning_rate=$LEARNING_RATE \
   --gradient_steps_per_iteration=$GRADIENT_STEPS \
-  --stockfish_time=$STOCKFISH_TIME"
+  --stockfish_time=$STOCKFISH_TIME \
+  --eval_puzzles=$EVAL_PUZZLES"
 
 # Add resume flag if set
 if [ "$RESUME" = true ]; then
@@ -216,7 +217,7 @@ echo "=========================================="
 echo "Evaluating selfplay model: ${BASE_MODEL}_selfplay"
 echo ""
 
-python puzzles.py --agent=${BASE_MODEL}_selfplay --num_puzzles=$NUM_PUZZLES > ../data/${BASE_MODEL}_selfplay_results.txt
+python puzzles.py --agent=${BASE_MODEL}_selfplay --num_puzzles=$EVAL_PUZZLES > ../data/${BASE_MODEL}_selfplay_results.txt
 
 echo "Post-training evaluation complete!"
 echo "Results saved to: ../data/${BASE_MODEL}_selfplay_results.txt"
@@ -230,7 +231,7 @@ echo "=========================================="
 python evaluate_selfplay.py \
   --base_model=$BASE_MODEL \
   --iteration=$NUM_ITERATIONS \
-  --num_puzzles=$NUM_PUZZLES
+  --num_puzzles=$EVAL_PUZZLES
 
 # Step 5: Elo Comparison (optional)
 echo ""

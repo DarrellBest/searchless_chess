@@ -25,6 +25,7 @@ python_logging.getLogger('orbax.checkpoint').setLevel(python_logging.WARNING)
 python_logging.getLogger('jax._src.sharding').setLevel(python_logging.ERROR)
 python_logging.getLogger('jax._src.xla_bridge').setLevel(python_logging.WARNING)
 python_logging.getLogger('jax._src.array_metadata_store').setLevel(python_logging.WARNING)
+python_logging.getLogger('jax._src.sharding_impls').setLevel(python_logging.ERROR)
 
 from jax.experimental import mesh_utils
 import jax.numpy as jnp
@@ -32,8 +33,10 @@ import jax.random as jrandom
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+import pandas as pd
 
 from searchless_chess.src import constants
+from searchless_chess.src import puzzles as puzzles_module
 from searchless_chess.src import selfplay_generator
 from searchless_chess.src import tokenizer
 from searchless_chess.src import training_utils
@@ -76,14 +79,14 @@ _LEARNING_RATE = flags.DEFINE_float(
 
 _GRADIENT_STEPS_PER_ITERATION = flags.DEFINE_integer(
     'gradient_steps_per_iteration',
-    100,
-    'Number of gradient steps per self-play iteration.',
+    50,
+    'Number of gradient steps per self-play iteration (reduced to prevent overfitting).',
 )
 
 _STOCKFISH_TIME = flags.DEFINE_float(
     'stockfish_time',
-    0.01,
-    'Time limit for Stockfish evaluation (seconds).',
+    0.1,
+    'Time limit for Stockfish evaluation (seconds, higher = better quality rewards).',
 )
 
 _SAVE_FREQUENCY = flags.DEFINE_integer(
@@ -96,6 +99,12 @@ _RESUME = flags.DEFINE_boolean(
     'resume',
     False,
     'Resume training from latest checkpoint if available.',
+)
+
+_EVAL_PUZZLES = flags.DEFINE_integer(
+    'eval_puzzles',
+    50,
+    'Number of puzzles to evaluate at each iteration (0 to skip).',
 )
 
 
@@ -163,6 +172,32 @@ def _load_base_model(model_name: str) -> tuple[hk.Params, transformer.Transforme
 
   logging.info(f'Successfully loaded {model_name} model from {checkpoint_dir}')
   return params, config
+
+
+def _evaluate_puzzles(engine, num_puzzles: int) -> tuple[int, float]:
+  """Evaluates the engine on puzzles and returns (correct, total).
+
+  Args:
+    engine: The engine to evaluate.
+    num_puzzles: Number of puzzles to evaluate.
+
+  Returns:
+    Tuple of (num_correct, accuracy_percentage).
+  """
+  puzzles_path = os.path.join(os.getcwd(), '../data/puzzles.csv')
+  puzzles = pd.read_csv(puzzles_path, nrows=num_puzzles)
+
+  num_correct = 0
+  for puzzle_id, puzzle in puzzles.iterrows():
+    correct = puzzles_module.evaluate_puzzle_from_pandas_row(
+        puzzle=puzzle,
+        engine=engine,
+    )
+    if correct:
+      num_correct += 1
+
+  accuracy = 100.0 * num_correct / num_puzzles
+  return num_correct, accuracy
 
 
 def _make_reward_loss_fn(predictor, return_buckets_values):
@@ -331,8 +366,8 @@ def main(argv: Sequence[str]) -> None:
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
 
-    # Update EMA params
-    ema_decay = 0.999
+    # Update EMA params (decay=0.99 means 1% new params per step)
+    ema_decay = 0.99
     params_ema = jax.tree.map(
         lambda ema, new: ema_decay * ema + (1 - ema_decay) * new,
         params_ema,
@@ -379,6 +414,7 @@ def main(argv: Sequence[str]) -> None:
         max_moves_per_game=200,
         temperature=1.0,
         reward_scaling=0.01,
+        game_outcome_weight=0.1,  # Scale down game outcome to balance with move-by-move rewards
     )
 
     logging.info(f'Generating {_GAMES_PER_ITERATION.value} self-play games...')
@@ -437,6 +473,15 @@ def main(argv: Sequence[str]) -> None:
               params_ema=params_ema,
               opt_state=opt_state,
           ),
+      )
+
+    # Evaluate on puzzles if requested
+    if _EVAL_PUZZLES.value > 0:
+      logging.info(f'\nEvaluating on {_EVAL_PUZZLES.value} puzzles...')
+      num_correct, accuracy = _evaluate_puzzles(neural_engine, _EVAL_PUZZLES.value)
+      logging.info(
+          f'Iteration {iteration + 1} Puzzle Results: '
+          f'{num_correct}/{_EVAL_PUZZLES.value} ({accuracy:.1f}%)'
       )
 
   # Wait for all checkpoints to finish saving

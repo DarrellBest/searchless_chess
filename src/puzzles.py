@@ -32,13 +32,12 @@ from searchless_chess.src.engines import engine as engine_lib
 
 _NUM_PUZZLES = flags.DEFINE_integer(
     name='num_puzzles',
-    default=None,
+    default=100,
     help='The number of puzzles to evaluate.',
-    required=True,
 )
 _AGENT = flags.DEFINE_enum(
     name='agent',
-    default=None,
+    default='9M',
     enum_values=[
         'local',
         '9M',
@@ -54,7 +53,6 @@ _AGENT = flags.DEFINE_enum(
         'leela_chess_zero_400_sims',
     ],
     help='The agent to evaluate.',
-    required=True,
 )
 
 
