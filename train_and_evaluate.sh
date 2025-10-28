@@ -16,7 +16,7 @@ STOCKFISH_TIME=0.1
 STOCKFISH_DEPTH=20
 EVAL_THRESHOLD=0.3
 BETA=0.1
-EVAL_PUZZLES=50
+NUM_PUZZLES=100
 SKIP_BASELINE=false
 RESUME=false
 
@@ -103,14 +103,6 @@ while [[ $# -gt 0 ]]; do
       BETA="$2"
       shift 2
       ;;
-    --eval_puzzles=*)
-      EVAL_PUZZLES="${1#*=}"
-      shift
-      ;;
-    --eval_puzzles)
-      EVAL_PUZZLES="$2"
-      shift 2
-      ;;
     --skip_baseline)
       SKIP_BASELINE=true
       shift
@@ -133,13 +125,12 @@ while [[ $# -gt 0 ]]; do
       echo "  --stockfish_depth N        Stockfish analysis depth [default: 20]"
       echo "  --eval_threshold PAWNS     Min eval difference for preference pairs [default: 0.3]"
       echo "  --beta BETA                DPO KL penalty coefficient [default: 0.1]"
-      echo "  --eval_puzzles N           Puzzles evaluated at each iteration [default: 50]"
       echo "  --skip_baseline            Skip baseline evaluation (if already done)"
       echo "  --resume                   Resume training from latest checkpoint"
       echo "  --help                     Show this help message"
       echo ""
       echo "Example:"
-      echo "  $0 --base_model=9M --num_iterations=5 --eval_puzzles=50"
+      echo "  $0 --base_model=9M --num_iterations=5"
       exit 0
       ;;
     *)
@@ -166,7 +157,7 @@ echo "  Stockfish Time: $STOCKFISH_TIME seconds"
 echo "  Stockfish Depth: $STOCKFISH_DEPTH"
 echo "  Eval Threshold: $EVAL_THRESHOLD pawns"
 echo "  DPO Beta: $BETA"
-echo "  Evaluation Puzzles per Iteration: $EVAL_PUZZLES"
+echo "  Evaluation Puzzles (baseline/final): $NUM_PUZZLES"
 echo "  Resume from checkpoint: $RESUME"
 echo ""
 
@@ -190,7 +181,7 @@ if [ "$SKIP_BASELINE" = false ]; then
   echo "Evaluating base model: $BASE_MODEL"
   echo ""
 
-  python puzzles.py --agent=$BASE_MODEL --num_puzzles=$EVAL_PUZZLES > ../data/${BASE_MODEL}_baseline_results.txt
+  python puzzles.py --agent=$BASE_MODEL --num_puzzles=$NUM_PUZZLES > ../data/${BASE_MODEL}_baseline_results.txt
 
   echo "Baseline evaluation complete!"
   echo "Results saved to: ../data/${BASE_MODEL}_baseline_results.txt"
@@ -218,8 +209,7 @@ TRAIN_CMD="python selfplay_train.py \
   --stockfish_time=$STOCKFISH_TIME \
   --stockfish_depth=$STOCKFISH_DEPTH \
   --eval_threshold=$EVAL_THRESHOLD \
-  --beta=$BETA \
-  --eval_puzzles=$EVAL_PUZZLES"
+  --beta=$BETA"
 
 # Add resume flag if set
 if [ "$RESUME" = true ]; then
@@ -253,7 +243,7 @@ echo "=========================================="
 echo "Evaluating selfplay model: ${BASE_MODEL}_selfplay"
 echo ""
 
-python puzzles.py --agent=${BASE_MODEL}_selfplay --num_puzzles=$EVAL_PUZZLES > ../data/${BASE_MODEL}_selfplay_results.txt
+python puzzles.py --agent=${BASE_MODEL}_selfplay --num_puzzles=$NUM_PUZZLES > ../data/${BASE_MODEL}_selfplay_results.txt
 
 echo "Post-training evaluation complete!"
 echo "Results saved to: ../data/${BASE_MODEL}_selfplay_results.txt"
@@ -267,7 +257,7 @@ echo "=========================================="
 python evaluate_selfplay.py \
   --base_model=$BASE_MODEL \
   --iteration=$NUM_ITERATIONS \
-  --num_puzzles=$EVAL_PUZZLES
+  --num_puzzles=$NUM_PUZZLES
 
 # Step 5: Elo Comparison (optional)
 echo ""
@@ -296,8 +286,11 @@ echo ""
 echo "Checkpoints saved to: ../checkpoints/${BASE_MODEL}_selfplay/"
 echo "Evaluation results saved to: ../data/"
 echo ""
-echo "To use the trained model:"
-echo "  python puzzles.py --agent=${BASE_MODEL}_selfplay --num_puzzles=50"
+echo "To evaluate the trained model on puzzles:"
+echo "  python puzzles.py --agent=${BASE_MODEL}_selfplay --num_puzzles=100"
 echo ""
-echo "To calculate Elo difference later:"
+echo "To calculate Elo difference:"
 echo "  python compare_engines.py --engine1=$BASE_MODEL --engine2=${BASE_MODEL}_selfplay --num_games=100"
+echo ""
+echo "Note: Puzzle evaluation is not performed during training for speed."
+echo "      Training metrics include mistake rate and average eval margin instead."

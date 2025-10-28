@@ -33,12 +33,10 @@ import jax.random as jrandom
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-import pandas as pd
 
 from searchless_chess.src import constants
 from searchless_chess.src import dpo_generator
 from searchless_chess.src import dpo_loss
-from searchless_chess.src import puzzles as puzzles_module
 from searchless_chess.src import tokenizer
 from searchless_chess.src import training_utils
 from searchless_chess.src import transformer
@@ -132,13 +130,6 @@ _RESUME = flags.DEFINE_boolean(
     'Resume training from latest checkpoint if available.',
 )
 
-_EVAL_PUZZLES = flags.DEFINE_integer(
-    'eval_puzzles',
-    50,
-    'Number of puzzles to evaluate at each iteration (0 to skip).',
-)
-
-
 def _load_base_model(model_name: str) -> tuple[hk.Params, transformer.TransformerConfig]:
   """Loads a pretrained base model.
 
@@ -203,32 +194,6 @@ def _load_base_model(model_name: str) -> tuple[hk.Params, transformer.Transforme
 
   logging.info(f'Successfully loaded {model_name} model from {checkpoint_dir}')
   return params, config
-
-
-def _evaluate_puzzles(engine, num_puzzles: int) -> tuple[int, float]:
-  """Evaluates the engine on puzzles and returns (correct, total).
-
-  Args:
-    engine: The engine to evaluate.
-    num_puzzles: Number of puzzles to evaluate.
-
-  Returns:
-    Tuple of (num_correct, accuracy_percentage).
-  """
-  puzzles_path = os.path.join(os.getcwd(), '../data/puzzles.csv')
-  puzzles = pd.read_csv(puzzles_path, nrows=num_puzzles)
-
-  num_correct = 0
-  for puzzle_id, puzzle in puzzles.iterrows():
-    correct = puzzles_module.evaluate_puzzle_from_pandas_row(
-        puzzle=puzzle,
-        engine=engine,
-    )
-    if correct:
-      num_correct += 1
-
-  accuracy = 100.0 * num_correct / num_puzzles
-  return num_correct, accuracy
 
 
 def _make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0):
@@ -524,14 +489,6 @@ def main(argv: Sequence[str]) -> None:
           ),
       )
 
-    # Evaluate on puzzles if requested
-    if _EVAL_PUZZLES.value > 0:
-      logging.info(f'\nEvaluating on {_EVAL_PUZZLES.value} puzzles...')
-      num_correct, accuracy = _evaluate_puzzles(neural_engine, _EVAL_PUZZLES.value)
-      logging.info(
-          f'Iteration {iteration + 1} Puzzle Results: '
-          f'{num_correct}/{_EVAL_PUZZLES.value} ({accuracy:.1f}%)'
-      )
 
   # Wait for all checkpoints to finish saving
   logging.info('Waiting for checkpoint finalization...')

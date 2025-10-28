@@ -233,16 +233,25 @@ class DPOSelfPlayGenerator:
     """
     # Generate games
     trajectories = []
+    total_positions = 0
     for game_idx in range(num_games):
       print(f'Generating self-play game {game_idx + 1}/{num_games}')
       trajectory = self.generate_game()
       trajectories.append(trajectory)
+      total_positions += len(trajectory.positions)
 
     # Analyze and create preference pairs
     print(f'\nAnalyzing {len(trajectories)} games with Stockfish...')
     preferences = self.create_preferences(trajectories)
 
-    print(f'Found {len(preferences)} preference pairs (mistakes)')
+    # Calculate statistics
+    num_mistakes = len(preferences)
+    mistake_rate = 100.0 * num_mistakes / total_positions if total_positions > 0 else 0
+    avg_eval_margin = np.mean([p.eval_margin for p in preferences]) if preferences else 0
+
+    print(f'Found {num_mistakes} preference pairs (mistakes)')
+    print(f'Mistake rate: {mistake_rate:.2f}% ({num_mistakes}/{total_positions} positions)')
+    print(f'Average eval margin: {avg_eval_margin:.3f} pawns')
 
     if len(preferences) == 0:
       print('No preferences found, model may have converged or threshold too high')
