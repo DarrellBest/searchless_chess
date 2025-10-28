@@ -45,3 +45,8 @@ data/test/
 data/*_results.txt
 data/*_comparison.json
 data/*_games.pgn
+
+# HuggingFace test files
+hf_models/
+hf_test_standalone/
+test_standalone_hf.py
