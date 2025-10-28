@@ -8,12 +8,15 @@ set -e  # Exit on error
 # Default parameters
 BASE_MODEL="9M"
 NUM_ITERATIONS=10
-GAMES_PER_ITERATION=20
+GAMES_PER_ITERATION=1000
 BATCH_SIZE=32
-LEARNING_RATE=0.0001
+LEARNING_RATE=0.00001
 GRADIENT_STEPS=50
 STOCKFISH_TIME=0.1
-EVAL_PUZZLES=100
+STOCKFISH_DEPTH=20
+EVAL_THRESHOLD=0.3
+BETA=0.1
+EVAL_PUZZLES=50
 SKIP_BASELINE=false
 RESUME=false
 
@@ -76,6 +79,30 @@ while [[ $# -gt 0 ]]; do
       STOCKFISH_TIME="$2"
       shift 2
       ;;
+    --stockfish_depth=*)
+      STOCKFISH_DEPTH="${1#*=}"
+      shift
+      ;;
+    --stockfish_depth)
+      STOCKFISH_DEPTH="$2"
+      shift 2
+      ;;
+    --eval_threshold=*)
+      EVAL_THRESHOLD="${1#*=}"
+      shift
+      ;;
+    --eval_threshold)
+      EVAL_THRESHOLD="$2"
+      shift 2
+      ;;
+    --beta=*)
+      BETA="${1#*=}"
+      shift
+      ;;
+    --beta)
+      BETA="$2"
+      shift 2
+      ;;
     --eval_puzzles=*)
       EVAL_PUZZLES="${1#*=}"
       shift
@@ -98,12 +125,15 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --base_model MODEL         Base model (9M, 136M, 270M) [default: 9M]"
       echo "  --num_iterations N         Training iterations [default: 10]"
-      echo "  --games_per_iteration N    Self-play games per iteration [default: 20]"
+      echo "  --games_per_iteration N    Self-play games per iteration [default: 1000]"
       echo "  --batch_size N             Training batch size [default: 32]"
-      echo "  --learning_rate LR         Learning rate [default: 0.0001]"
+      echo "  --learning_rate LR         Learning rate [default: 0.00001]"
       echo "  --gradient_steps N         Gradient steps per iteration [default: 50]"
       echo "  --stockfish_time TIME      Stockfish time per position in seconds [default: 0.1]"
-      echo "  --eval_puzzles N           Puzzles evaluated at each iteration [default: 100]"
+      echo "  --stockfish_depth N        Stockfish analysis depth [default: 20]"
+      echo "  --eval_threshold PAWNS     Min eval difference for preference pairs [default: 0.3]"
+      echo "  --beta BETA                DPO KL penalty coefficient [default: 0.1]"
+      echo "  --eval_puzzles N           Puzzles evaluated at each iteration [default: 50]"
       echo "  --skip_baseline            Skip baseline evaluation (if already done)"
       echo "  --resume                   Resume training from latest checkpoint"
       echo "  --help                     Show this help message"
@@ -132,7 +162,10 @@ echo "  Games per Iteration: $GAMES_PER_ITERATION"
 echo "  Batch Size: $BATCH_SIZE"
 echo "  Learning Rate: $LEARNING_RATE"
 echo "  Gradient Steps: $GRADIENT_STEPS"
-echo "  Stockfish Time: $STOCKFISH_TIME"
+echo "  Stockfish Time: $STOCKFISH_TIME seconds"
+echo "  Stockfish Depth: $STOCKFISH_DEPTH"
+echo "  Eval Threshold: $EVAL_THRESHOLD pawns"
+echo "  DPO Beta: $BETA"
 echo "  Evaluation Puzzles per Iteration: $EVAL_PUZZLES"
 echo "  Resume from checkpoint: $RESUME"
 echo ""
@@ -183,6 +216,9 @@ TRAIN_CMD="python selfplay_train.py \
   --learning_rate=$LEARNING_RATE \
   --gradient_steps_per_iteration=$GRADIENT_STEPS \
   --stockfish_time=$STOCKFISH_TIME \
+  --stockfish_depth=$STOCKFISH_DEPTH \
+  --eval_threshold=$EVAL_THRESHOLD \
+  --beta=$BETA \
   --eval_puzzles=$EVAL_PUZZLES"
 
 # Add resume flag if set

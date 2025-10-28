@@ -1,4 +1,4 @@
-"""Self-play training script with Stockfish-based rewards."""
+"""Self-play training script with DPO (Direct Preference Optimization)."""
 
 from collections.abc import Sequence
 import copy
@@ -36,8 +36,9 @@ import orbax.checkpoint as ocp
 import pandas as pd
 
 from searchless_chess.src import constants
+from searchless_chess.src import dpo_generator
+from searchless_chess.src import dpo_loss
 from searchless_chess.src import puzzles as puzzles_module
-from searchless_chess.src import selfplay_generator
 from searchless_chess.src import tokenizer
 from searchless_chess.src import training_utils
 from searchless_chess.src import transformer
@@ -86,7 +87,37 @@ _GRADIENT_STEPS_PER_ITERATION = flags.DEFINE_integer(
 _STOCKFISH_TIME = flags.DEFINE_float(
     'stockfish_time',
     0.1,
-    'Time limit for Stockfish evaluation (seconds, higher = better quality rewards).',
+    'Time limit for Stockfish analysis per position (seconds).',
+)
+
+_STOCKFISH_DEPTH = flags.DEFINE_integer(
+    'stockfish_depth',
+    20,
+    'Depth for Stockfish analysis (starts here, increases with curriculum).',
+)
+
+_EVAL_THRESHOLD = flags.DEFINE_float(
+    'eval_threshold',
+    0.3,
+    'Minimum evaluation difference (in pawns) to create a preference pair.',
+)
+
+_BETA = flags.DEFINE_float(
+    'beta',
+    0.1,
+    'KL penalty coefficient for DPO loss.',
+)
+
+_UPDATE_REF_EVERY = flags.DEFINE_integer(
+    'update_ref_every',
+    3,
+    'Update reference model every N iterations.',
+)
+
+_DPO_TEMPERATURE = flags.DEFINE_float(
+    'dpo_temperature',
+    1.0,
+    'Temperature for DPO probability computation.',
 )
 
 _SAVE_FREQUENCY = flags.DEFINE_integer(
@@ -200,61 +231,46 @@ def _evaluate_puzzles(engine, num_puzzles: int) -> tuple[int, float]:
   return num_correct, accuracy
 
 
-def _make_reward_loss_fn(predictor, return_buckets_values):
-  """Creates a value-based loss function for Q-learning with rewards.
+def _make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0):
+  """Creates a DPO loss function.
+
+  DPO directly optimizes the model to prefer better moves (from Stockfish)
+  over worse moves (the model's own mistakes) without needing a separate
+  reward model or value function.
 
   Args:
     predictor: The transformer predictor.
-    return_buckets_values: Array of return bucket values for computing Q-values.
+    z_atoms: Array of return bucket atoms (support values).
+    beta: KL penalty coefficient (default 0.1).
+    temperature: Temperature for action selection (default 1.0).
 
   Returns:
-    Loss function that takes params, sequences, and rewards.
+    Loss function that takes (online_params, reference_params, batch_data).
   """
-  def loss_fn(params, sequences, rewards):
-    """Computes value-based loss: trains Q-values to match rewards.
-
-    This is similar to Deep Q-Learning (DQN) where we train Q(s,a) to match
-    observed returns. We weight the loss by reward magnitude to focus on
-    important transitions.
+  def loss_fn(online_params, reference_params, positions, chosen_moves, rejected_moves):
+    """Computes DPO loss for preference pairs.
 
     Args:
-      params: Model parameters.
-      sequences: [batch_size, seq_len] input sequences.
-      rewards: [batch_size] target Q-values (rewards from Stockfish + outcomes).
+      online_params: Current model parameters.
+      reference_params: Reference model parameters (frozen).
+      positions: [batch_size, seq_len] Tokenized positions.
+      chosen_moves: [batch_size] Better move indices (Stockfish).
+      rejected_moves: [batch_size] Worse move indices (model's moves).
 
     Returns:
       Scalar loss value.
     """
-    # Get Q-value distribution predictions (log probabilities over return buckets)
-    # Shape: [batch_size, seq_len, num_return_buckets]
-    bucket_log_probs = predictor.predict(params=params, targets=sequences, rng=None)
-
-    # Extract Q-value distribution for the action token (second to last position)
-    # Shape: [batch_size, num_return_buckets]
-    action_bucket_log_probs = bucket_log_probs[:, -2]
-    action_bucket_probs = jnp.exp(action_bucket_log_probs)
-
-    # Compute predicted Q-value (expected return)
-    # Shape: [batch_size]
-    predicted_q = jnp.dot(action_bucket_probs, return_buckets_values)
-
-    # Target Q-values come from rewards (Stockfish eval + game outcome)
-    target_q = rewards
-
-    # Compute TD error
-    td_error = predicted_q - target_q
-
-    # Use Huber loss for robustness to outliers
-    huber_delta = 1.0
-    abs_error = jnp.abs(td_error)
-    quadratic = jnp.minimum(abs_error, huber_delta)
-    linear = abs_error - quadratic
-    huber_loss = 0.5 * quadratic ** 2 + huber_delta * linear
-
-    # Mean loss
-    loss = jnp.mean(huber_loss)
-
-    return loss
+    return dpo_loss.dpo_loss(
+        online_params=online_params,
+        reference_params=reference_params,
+        predictor=predictor,
+        positions=positions,
+        chosen_moves=chosen_moves,
+        rejected_moves=rejected_moves,
+        z_atoms=z_atoms,
+        beta=beta,
+        temperature=temperature,
+    )
 
   return loss_fn
 
@@ -263,14 +279,18 @@ def main(argv: Sequence[str]) -> None:
   if len(argv) > 1:
     raise app.UsageError('Too many command-line arguments.')
 
-  logging.info('Starting self-play training with Stockfish rewards')
+  logging.info('Starting DPO self-play training')
   logging.info(f'Base model: {_BASE_MODEL.value}')
   logging.info(f'Iterations: {_NUM_ITERATIONS.value}')
   logging.info(f'Games per iteration: {_GAMES_PER_ITERATION.value}')
+  logging.info(f'Stockfish depth: {_STOCKFISH_DEPTH.value}')
+  logging.info(f'Eval threshold: {_EVAL_THRESHOLD.value} pawns')
+  logging.info(f'DPO beta: {_BETA.value}')
 
   # Load base model
   params, config = _load_base_model(_BASE_MODEL.value)
-  params_ema = copy.deepcopy(params)
+  params_ema = copy.deepcopy(params)  # For checkpointing (fast EMA)
+  reference_params = copy.deepcopy(params)  # For DPO reference (updated periodically)
 
   # Build predictor
   predictor = transformer.build_transformer_predictor(config)
@@ -318,6 +338,9 @@ def main(argv: Sequence[str]) -> None:
           use_ema_params=True,
       )
 
+      # Initialize reference params from EMA (for DPO)
+      reference_params = copy.deepcopy(params_ema)
+
       # Load optimizer state (use raw checkpointer with restore_args)
       latest_checkpoint = os.path.join(checkpoint_dir, str(latest_iteration))
       checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
@@ -345,31 +368,39 @@ def main(argv: Sequence[str]) -> None:
 
   params = training_utils.replicate(params, sharding)
   params_ema = training_utils.replicate(params_ema, sharding)
+  reference_params = training_utils.replicate(reference_params, sharding)
   opt_state = training_utils.replicate(opt_state, sharding)
 
-  # Get return bucket values for Q-value computation
+  # Get return bucket values (support atoms) for Q-value computation
   num_return_buckets = 128
-  _, return_buckets_values = utils.get_uniform_buckets_edges_values(
-      num_return_buckets
-  )
+  _, return_buckets_values = utils.get_uniform_buckets_edges_values(num_return_buckets)
+  # Convert to JAX array
+  z_atoms = jnp.array(return_buckets_values, dtype=jnp.float32)
 
-  # Create loss and gradient functions
-  loss_fn = _make_reward_loss_fn(predictor, return_buckets_values)
-  grad_fn = jax.value_and_grad(loss_fn)
+  # Create DPO loss and gradient functions
+  loss_fn = _make_dpo_loss_fn(
+      predictor,
+      z_atoms,
+      beta=_BETA.value,
+      temperature=_DPO_TEMPERATURE.value
+  )
+  # Gradient wrt first argument (online_params)
+  grad_fn = jax.value_and_grad(loss_fn, argnums=0)
 
   @jax.jit
-  def update_step(params, params_ema, opt_state, sequences, rewards):
-    """Single gradient update step."""
-    loss_val, grads = grad_fn(params, sequences, rewards)
+  def update_step(params, params_ema, reference_params, opt_state, positions, chosen_moves, rejected_moves):
+    """Single gradient update step with DPO."""
+    # Compute loss and gradients using online params and reference params
+    loss_val, grads = grad_fn(params, reference_params, positions, chosen_moves, rejected_moves)
 
-    # Apply gradients
+    # Apply gradients to online params
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
 
-    # Update EMA params (decay=0.99 means 1% new params per step)
-    ema_decay = 0.99
+    # Update fast EMA params (for checkpointing, decay=0.99)
+    fast_ema_decay = 0.99
     params_ema = jax.tree.map(
-        lambda ema, new: ema_decay * ema + (1 - ema_decay) * new,
+        lambda ema, new: fast_ema_decay * ema + (1 - fast_ema_decay) * new,
         params_ema,
         params,
     )
@@ -387,8 +418,10 @@ def main(argv: Sequence[str]) -> None:
       checkpoint_dir=checkpoint_dir,
   )
 
-  # Main self-play training loop
+  # Main DPO self-play training loop
   total_iterations = start_iteration + _NUM_ITERATIONS.value
+  current_sf_depth = _STOCKFISH_DEPTH.value
+
   for iteration in range(start_iteration, total_iterations):
     logging.info(f'\n=== Iteration {iteration + 1}/{total_iterations} ===')
 
@@ -407,54 +440,61 @@ def main(argv: Sequence[str]) -> None:
         temperature=1.0,
     )
 
-    # Generate self-play games
-    generator = selfplay_generator.SelfPlayGenerator(
+    # Generate self-play games and create preference pairs using DPO
+    generator = dpo_generator.DPOSelfPlayGenerator(
         neural_engine=neural_engine,
+        stockfish_depth=current_sf_depth,
         stockfish_time_limit=_STOCKFISH_TIME.value,
         max_moves_per_game=200,
+        eval_threshold=_EVAL_THRESHOLD.value,
+        max_position_eval=3.0,
         temperature=1.0,
-        reward_scaling=0.01,
-        game_outcome_weight=0.1,  # Scale down game outcome to balance with move-by-move rewards
     )
 
     logging.info(f'Generating {_GAMES_PER_ITERATION.value} self-play games...')
+    logging.info(f'Using Stockfish depth: {current_sf_depth}')
 
-    # Collect experiences
-    all_sequences = []
-    all_rewards = []
+    # Collect preference pairs: (position, chosen_move, rejected_move)
+    all_positions = []
+    all_chosen_moves = []
+    all_rejected_moves = []
 
-    for sequences_batch, rewards_batch in generator.generate_batch(
+    for positions, chosen_moves, rejected_moves in generator.generate_batch(
         num_games=_GAMES_PER_ITERATION.value,
         batch_size=_BATCH_SIZE.value,
     ):
-      all_sequences.append(sequences_batch)
-      all_rewards.append(rewards_batch)
+      all_positions.append(positions)
+      all_chosen_moves.append(chosen_moves)
+      all_rejected_moves.append(rejected_moves)
 
     generator.close()
 
-    if not all_sequences:
-      logging.warning('No experiences generated, skipping training.')
+    if not all_positions:
+      logging.warning('No preference pairs generated, skipping training.')
+      logging.warning('Model may have converged or eval_threshold is too high.')
       continue
 
-    # Train on collected experiences
+    # Train on collected preference pairs
     logging.info(f'Training for {_GRADIENT_STEPS_PER_ITERATION.value} steps...')
 
-    total_batches = len(all_sequences)
+    total_batches = len(all_positions)
     batch_idx = 0
 
     for step in range(_GRADIENT_STEPS_PER_ITERATION.value):
       # Cycle through batches
-      sequences = all_sequences[batch_idx % total_batches]
-      rewards = all_rewards[batch_idx % total_batches]
+      positions = all_positions[batch_idx % total_batches]
+      chosen_moves = all_chosen_moves[batch_idx % total_batches]
+      rejected_moves = all_rejected_moves[batch_idx % total_batches]
       batch_idx += 1
 
       # Shard data
-      sequences = jax.lax.with_sharding_constraint(sequences, sharding)
-      rewards = jax.lax.with_sharding_constraint(rewards, sharding)
+      positions = jax.lax.with_sharding_constraint(positions, sharding)
+      chosen_moves = jax.lax.with_sharding_constraint(chosen_moves, sharding)
+      rejected_moves = jax.lax.with_sharding_constraint(rejected_moves, sharding)
 
-      # Update parameters
+      # Update parameters with DPO
       params, params_ema, opt_state, loss_val, grad_norm = update_step(
-          params, params_ema, opt_state, sequences, rewards
+          params, params_ema, reference_params, opt_state, positions, chosen_moves, rejected_moves
       )
 
       if step % 10 == 0:
@@ -462,6 +502,15 @@ def main(argv: Sequence[str]) -> None:
             f'  Step {step}/{_GRADIENT_STEPS_PER_ITERATION.value}: '
             f'loss={float(loss_val):.4f}, grad_norm={float(grad_norm):.4f}'
         )
+
+    # Update reference model periodically
+    if (iteration + 1) % _UPDATE_REF_EVERY.value == 0:
+      logging.info('Updating reference model...')
+      reference_params = jax.tree.map(lambda x: x, params_ema)
+
+    # Progressive curriculum: increase Stockfish depth after iteration 5
+    if iteration >= 5:
+      current_sf_depth = min(current_sf_depth + 2, 25)
 
     # Save checkpoint
     if (iteration + 1) % _SAVE_FREQUENCY.value == 0:
