@@ -232,15 +232,16 @@ def main(argv: Sequence[str]) -> None:
 
   # Calculate approximate Elo difference
   # Using formula: Elo_diff ≈ -400 * log10(1/win_rate - 1)
-  if engine1_score > 0 and engine1_score < _NUM_GAMES.value:
-    win_rate = engine1_score / _NUM_GAMES.value
+  # Calculate from engine2's perspective for correct sign
+  if engine2_score > 0 and engine2_score < _NUM_GAMES.value:
+    win_rate = engine2_score / _NUM_GAMES.value
     elo_diff = -400 * np.log10(1 / win_rate - 1)
     print(f'\nApproximate Elo difference: {elo_diff:+.0f}')
     print(f'({engine2_name} is {elo_diff:+.0f} Elo relative to {engine1_name})')
-  elif engine1_score == _NUM_GAMES.value:
-    print(f'\n{engine1_name} won all games (Elo diff > +400)')
+  elif engine2_score == _NUM_GAMES.value:
+    print(f'\n{engine2_name} won all games (Elo diff > +400)')
   else:
-    print(f'\n{engine2_name} won all games (Elo diff < -400)')
+    print(f'\n{engine1_name} won all games (Elo diff < -400)')
 
   # Run BayesElo if available
   bayeselo_path = os.path.join(os.getcwd(), '../BayesElo/bayeselo')
