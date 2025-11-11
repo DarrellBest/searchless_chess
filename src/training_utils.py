@@ -225,9 +225,51 @@ def restore_checkpoint(
   )
 
 
+def save_parameters(
+    params: hk.Params,
+    step: int | str,
+    use_ema_params: bool = False,
+    checkpoint_dir: str | None = None,
+) -> None:
+  """Saves parameters to checkpoint directory.
+
+  Args:
+    params: The parameters of the model to save.
+    step: The step at which to save the checkpoint. Can be int or str (e.g., 'best', '100000').
+    use_ema_params: If True, saves to 'params_ema' subdirectory, else 'params'.
+    checkpoint_dir: The directory to save parameters to. If `None`, uses default.
+  """
+  if checkpoint_dir is None:
+    checkpoint_dir = '/tmp/checkpoints'
+
+  # Construct the save path
+  dir_name = 'params_ema' if use_ema_params else 'params'
+  checkpoint_path = pathlib.Path(checkpoint_dir) / str(step) / dir_name
+
+  # Create directory if it doesn't exist
+  checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+  # Only allow overwriting the "best" checkpoint
+  # Regular checkpoints should never be overwritten (error if they exist)
+  if checkpoint_path.exists():
+    if step == 'best':
+      import shutil
+      shutil.rmtree(checkpoint_path)
+    else:
+      raise ValueError(
+          f'Checkpoint already exists at {checkpoint_path}. '
+          'Regular checkpoints should not be overwritten. '
+          'Only the "best" checkpoint can be overwritten.'
+      )
+
+  # Save the checkpoint
+  checkpointer = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
+  checkpointer.save(checkpoint_path, params)
+
+
 def load_parameters(
     params: hk.Params,
-    step: int = -1,
+    step: int | str = -1,
     use_ema_params: bool = False,
     checkpoint_dir: str | None = None,
 ) -> hk.Params:
@@ -236,7 +278,7 @@ def load_parameters(
   Args:
     params: The parameters of the model.
     step: The step at which that checkpoint was saved. If -1, loads the largest
-      available step.
+      available step. Can be an int or string (e.g., 'best', '100000').
     use_ema_params: Enables loading of ema-ed params
     checkpoint_dir: The directory to load parameters from. If `None`, the
       default directory is retrieved.
@@ -250,12 +292,19 @@ def load_parameters(
   if checkpoint_dir is None:
     checkpoint_dir = '/tmp/checkpoints'
 
-  # Set the step to the largest available step if required.
-  checkpoint_steps = ocp.utils.checkpoint_steps(checkpoint_dir)
-  if step == -1:
-    step = checkpoint_steps[-1]
-  elif step not in checkpoint_steps:
-    raise FileNotFoundError(f'Checkpoint {step} not found in {checkpoint_dir}.')
+  # Handle string steps (like 'best' or '100000')
+  if isinstance(step, str):
+    # Check if the directory exists
+    checkpoint_path_base = pathlib.Path(checkpoint_dir) / step
+    if not checkpoint_path_base.exists():
+      raise FileNotFoundError(f'Checkpoint {step} not found in {checkpoint_dir}.')
+  else:
+    # Set the step to the largest available step if required.
+    checkpoint_steps = ocp.utils.checkpoint_steps(checkpoint_dir)
+    if step == -1:
+      step = checkpoint_steps[-1]
+    elif step not in checkpoint_steps:
+      raise FileNotFoundError(f'Checkpoint {step} not found in {checkpoint_dir}.')
 
   # Construct the restore_args to inform orbax about the desired sharding.
   restore_args = ocp.checkpoint_utils.construct_restore_args(params)

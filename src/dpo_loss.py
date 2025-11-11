@@ -161,8 +161,9 @@ def dpo_loss(
     z_atoms: jnp.ndarray,
     beta: float = 0.1,
     temperature: float = 1.0,
-) -> jnp.ndarray:
-  """Computes DPO loss for preference pairs.
+    kl_penalty: float = 0.0,
+) -> tuple[jnp.ndarray, dict]:
+  """Computes DPO loss for preference pairs with optional KL anchor.
 
   The loss encourages the model to assign higher probability to chosen moves
   (from Stockfish) compared to rejected moves (model's mistakes), relative
@@ -178,9 +179,15 @@ def dpo_loss(
     z_atoms: [n_atoms] Support atoms for Q-value distributions.
     beta: KL penalty coefficient (default 0.1).
     temperature: Temperature for action selection (default 1.0).
+    kl_penalty: Weight for explicit KL anchor to reference (default 0.0).
 
   Returns:
-    Scalar loss value.
+    Tuple of (loss, metrics_dict) where metrics contains:
+      - dpo_loss: Base DPO loss
+      - kl_loss: KL divergence to reference
+      - total_loss: Combined loss
+      - reward_accuracy: % where chosen > rejected
+      - reward_margin: Average log prob margin
   """
   # Compute log probabilities from online model
   log_pi_chosen = compute_move_log_probs(
@@ -214,12 +221,36 @@ def dpo_loss(
 
   # DPO loss: -E[log σ(β * (r_chosen - r_rejected))]
   logits = beta * (r_chosen - r_rejected)
-  loss = -jax.nn.log_sigmoid(logits).mean()
+  dpo_loss_value = -jax.nn.log_sigmoid(logits).mean()
 
-  return loss
+  # Optional KL anchor: explicit penalty to stay close to reference
+  # KL(π_θ || π_ref) ≈ E[log π_θ(a|s) - log π_ref(a|s)]
+  # Average KL over both chosen and rejected moves
+  kl_chosen = log_pi_chosen - log_ref_chosen
+  kl_rejected = log_pi_rejected - log_ref_rejected
+  kl_divergence = 0.5 * (kl_chosen.mean() + kl_rejected.mean())
+
+  # Total loss with optional KL anchor
+  total_loss = dpo_loss_value
+  if kl_penalty > 0.0:
+    total_loss = total_loss + kl_penalty * kl_divergence
+
+  # Compute metrics for monitoring
+  reward_accuracy = (r_chosen > r_rejected).astype(jnp.float32).mean()
+  reward_margin = (r_chosen - r_rejected).mean()
+
+  metrics = {
+      'dpo_loss': dpo_loss_value,
+      'kl_loss': kl_divergence,
+      'total_loss': total_loss,
+      'reward_accuracy': reward_accuracy,
+      'reward_margin': reward_margin,
+  }
+
+  return total_loss, metrics
 
 
-def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0):
+def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0.0):
   """Creates a DPO loss function.
 
   Args:
@@ -227,6 +258,7 @@ def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0):
     z_atoms: Support atoms for Q-value distributions.
     beta: KL penalty coefficient.
     temperature: Temperature for action selection.
+    kl_penalty: Weight for explicit KL anchor to reference (default 0.0).
 
   Returns:
     Loss function that takes (online_params, reference_params, batch).
@@ -242,6 +274,7 @@ def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0):
         z_atoms=z_atoms,
         beta=beta,
         temperature=temperature,
+        kl_penalty=kl_penalty,
     )
 
   return loss_fn

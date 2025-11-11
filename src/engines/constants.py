@@ -112,17 +112,18 @@ def _build_neural_engine(
   )
 
 
-def _build_selfplay_engine(base_model: str, iteration: int):
-  """Builds a selfplay-trained neural engine.
+def _build_selfplay_engine(base_model: str, iteration: int | str, training_type: str = 'selfplay'):
+  """Builds a fine-tuned neural engine.
 
   Args:
     base_model: Base model name (e.g., '9M', '136M', '270M').
-    iteration: Training iteration checkpoint to load.
+    iteration: Training iteration checkpoint to load (int or str like 'best', '10000pairs').
+    training_type: Type of training ('selfplay', 'lichess', etc.).
 
   Returns:
-    Neural engine with selfplay-trained parameters.
+    Neural engine with fine-tuned parameters.
   """
-  model_name = f'{base_model}_selfplay'
+  model_name = f'{base_model}_{training_type}'
 
   # Same architecture as base model
   if base_model == '9M':
@@ -184,10 +185,79 @@ ENGINE_BUILDERS = {
     '270M': functools.partial(
         _build_neural_engine, model_name='270M', checkpoint_step=6_400_000
     ),
-    # Selfplay-trained models (use latest iteration by default)
+    # Selfplay-trained models (9M - iterations 0-20)
     '9M_selfplay': lambda: _build_selfplay_engine('9M', iteration=1),
+    '9M_selfplay_iter0': lambda: _build_selfplay_engine('9M', iteration=0),  # Warm-up checkpoint
+    '9M_selfplay_iter1': lambda: _build_selfplay_engine('9M', iteration=1),
+    '9M_selfplay_iter2': lambda: _build_selfplay_engine('9M', iteration=2),
+    '9M_selfplay_iter3': lambda: _build_selfplay_engine('9M', iteration=3),
+    '9M_selfplay_iter4': lambda: _build_selfplay_engine('9M', iteration=4),
+    '9M_selfplay_iter5': lambda: _build_selfplay_engine('9M', iteration=5),
+    '9M_selfplay_iter6': lambda: _build_selfplay_engine('9M', iteration=6),
+    '9M_selfplay_iter7': lambda: _build_selfplay_engine('9M', iteration=7),
+    '9M_selfplay_iter8': lambda: _build_selfplay_engine('9M', iteration=8),
+    '9M_selfplay_iter9': lambda: _build_selfplay_engine('9M', iteration=9),
+    '9M_selfplay_iter10': lambda: _build_selfplay_engine('9M', iteration=10),
+    '9M_selfplay_iter11': lambda: _build_selfplay_engine('9M', iteration=11),
+    '9M_selfplay_iter12': lambda: _build_selfplay_engine('9M', iteration=12),
+    '9M_selfplay_iter13': lambda: _build_selfplay_engine('9M', iteration=13),
+    '9M_selfplay_iter14': lambda: _build_selfplay_engine('9M', iteration=14),
+    '9M_selfplay_iter15': lambda: _build_selfplay_engine('9M', iteration=15),
+    '9M_selfplay_iter16': lambda: _build_selfplay_engine('9M', iteration=16),
+    '9M_selfplay_iter17': lambda: _build_selfplay_engine('9M', iteration=17),
+    '9M_selfplay_iter18': lambda: _build_selfplay_engine('9M', iteration=18),
+    '9M_selfplay_iter19': lambda: _build_selfplay_engine('9M', iteration=19),
+    '9M_selfplay_iter20': lambda: _build_selfplay_engine('9M', iteration=20),
+    # Selfplay-trained models (136M and 270M)
     '136M_selfplay': lambda: _build_selfplay_engine('136M', iteration=1),
+    '136M_selfplay_iter1': lambda: _build_selfplay_engine('136M', iteration=1),
+    '136M_selfplay_iter2': lambda: _build_selfplay_engine('136M', iteration=2),
+    '136M_selfplay_iter3': lambda: _build_selfplay_engine('136M', iteration=3),
+    '136M_selfplay_iter4': lambda: _build_selfplay_engine('136M', iteration=4),
+    '136M_selfplay_iter5': lambda: _build_selfplay_engine('136M', iteration=5),
     '270M_selfplay': lambda: _build_selfplay_engine('270M', iteration=1),
+    '270M_selfplay_iter1': lambda: _build_selfplay_engine('270M', iteration=1),
+    '270M_selfplay_iter2': lambda: _build_selfplay_engine('270M', iteration=2),
+    '270M_selfplay_iter3': lambda: _build_selfplay_engine('270M', iteration=3),
+    '270M_selfplay_iter4': lambda: _build_selfplay_engine('270M', iteration=4),
+    '270M_selfplay_iter5': lambda: _build_selfplay_engine('270M', iteration=5),
+    # Lichess DPO-trained models (9M) - checkpoints named by pairs trained
+    '9M_lichess_100k': lambda: _build_selfplay_engine('9M', iteration='100000', training_type='lichess'),
+    '9M_lichess_200k': lambda: _build_selfplay_engine('9M', iteration='200000', training_type='lichess'),
+    '9M_lichess_300k': lambda: _build_selfplay_engine('9M', iteration='300000', training_type='lichess'),
+    '9M_lichess_400k': lambda: _build_selfplay_engine('9M', iteration='400000', training_type='lichess'),
+    '9M_lichess_500k': lambda: _build_selfplay_engine('9M', iteration='500000', training_type='lichess'),
+    '9M_lichess_600k': lambda: _build_selfplay_engine('9M', iteration='600000', training_type='lichess'),
+    '9M_lichess_700k': lambda: _build_selfplay_engine('9M', iteration='700000', training_type='lichess'),
+    '9M_lichess_800k': lambda: _build_selfplay_engine('9M', iteration='800000', training_type='lichess'),
+    '9M_lichess_900k': lambda: _build_selfplay_engine('9M', iteration='900000', training_type='lichess'),
+    '9M_lichess_1000k': lambda: _build_selfplay_engine('9M', iteration='1000000', training_type='lichess'),
+    # Legacy/old iteration names (kept for backwards compatibility)
+    '9M_lichess_best': lambda: _build_selfplay_engine('9M', iteration='best', training_type='lichess'),
+    '9M_lichess': lambda: _build_selfplay_engine('9M', iteration=24, training_type='lichess'),
+    '9M_lichess_iter2': lambda: _build_selfplay_engine('9M', iteration=2, training_type='lichess'),
+    '9M_lichess_iter3': lambda: _build_selfplay_engine('9M', iteration=3, training_type='lichess'),
+    '9M_lichess_iter4': lambda: _build_selfplay_engine('9M', iteration=4, training_type='lichess'),
+    '9M_lichess_iter5': lambda: _build_selfplay_engine('9M', iteration=5, training_type='lichess'),
+    '9M_lichess_iter6': lambda: _build_selfplay_engine('9M', iteration=6, training_type='lichess'),
+    '9M_lichess_iter7': lambda: _build_selfplay_engine('9M', iteration=7, training_type='lichess'),
+    '9M_lichess_iter8': lambda: _build_selfplay_engine('9M', iteration=8, training_type='lichess'),
+    '9M_lichess_iter9': lambda: _build_selfplay_engine('9M', iteration=9, training_type='lichess'),
+    '9M_lichess_iter10': lambda: _build_selfplay_engine('9M', iteration=10, training_type='lichess'),
+    '9M_lichess_iter11': lambda: _build_selfplay_engine('9M', iteration=11, training_type='lichess'),
+    '9M_lichess_iter12': lambda: _build_selfplay_engine('9M', iteration=12, training_type='lichess'),
+    '9M_lichess_iter13': lambda: _build_selfplay_engine('9M', iteration=13, training_type='lichess'),
+    '9M_lichess_iter14': lambda: _build_selfplay_engine('9M', iteration=14, training_type='lichess'),
+    '9M_lichess_iter15': lambda: _build_selfplay_engine('9M', iteration=15, training_type='lichess'),
+    '9M_lichess_iter16': lambda: _build_selfplay_engine('9M', iteration=16, training_type='lichess'),
+    '9M_lichess_iter17': lambda: _build_selfplay_engine('9M', iteration=17, training_type='lichess'),
+    '9M_lichess_iter18': lambda: _build_selfplay_engine('9M', iteration=18, training_type='lichess'),
+    '9M_lichess_iter19': lambda: _build_selfplay_engine('9M', iteration=19, training_type='lichess'),
+    '9M_lichess_iter20': lambda: _build_selfplay_engine('9M', iteration=20, training_type='lichess'),
+    '9M_lichess_iter21': lambda: _build_selfplay_engine('9M', iteration=21, training_type='lichess'),
+    '9M_lichess_iter22': lambda: _build_selfplay_engine('9M', iteration=22, training_type='lichess'),
+    '9M_lichess_iter23': lambda: _build_selfplay_engine('9M', iteration=23, training_type='lichess'),
+    '9M_lichess_iter24': lambda: _build_selfplay_engine('9M', iteration=24, training_type='lichess'),
     'stockfish': lambda: stockfish_engine.StockfishEngine(
         limit=chess.engine.Limit(time=0.05)
     ),

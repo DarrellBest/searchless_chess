@@ -276,6 +276,10 @@ def main(argv: Sequence[str]) -> None:
 
   print(f'\nPGN file saved to: {pgn_path}')
 
+  # Close engines to prevent hanging
+  if hasattr(_EVAL_STOCKFISH_ENGINE, '_raw_engine'):
+    _EVAL_STOCKFISH_ENGINE._raw_engine.quit()
+
 
 if __name__ == '__main__':
   app.run(main)

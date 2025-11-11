@@ -46,6 +46,17 @@ _AGENT = flags.DEFINE_enum(
         '9M_selfplay',
         '136M_selfplay',
         '270M_selfplay',
+        '9M_lichess_best',
+        '9M_lichess_100k',
+        '9M_lichess_200k',
+        '9M_lichess_300k',
+        '9M_lichess_400k',
+        '9M_lichess_500k',
+        '9M_lichess_600k',
+        '9M_lichess_700k',
+        '9M_lichess_800k',
+        '9M_lichess_900k',
+        '9M_lichess_1000k',
         'stockfish',
         'stockfish_all_moves',
         'leela_chess_zero_depth_1',
@@ -114,6 +125,10 @@ def main(argv: Sequence[str]) -> None:
     print(
         {'puzzle_id': puzzle_id, 'correct': correct, 'rating': puzzle['Rating']}
     )
+
+  # Cleanup: close the engine if it has a close method (e.g., Stockfish)
+  if hasattr(engine, 'close'):
+    engine.close()
 
 
 if __name__ == '__main__':
