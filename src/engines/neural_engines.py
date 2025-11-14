@@ -16,6 +16,7 @@
 """Implements the neural engines, returning analysis metrics for input FENs."""
 
 from collections.abc import Callable, Sequence
+import logging
 
 import chess
 import haiku as hk
@@ -46,11 +47,22 @@ class NeuralEngine(engine.Engine):
       return_buckets_values: np.ndarray | None = None,
       predict_fn: PredictFn | None = None,
       temperature: float | None = None,
+      reference_predict_fn: PredictFn | None = None,
+      constrained_greedy_k: int | None = None,
+      debug_constrained_greedy: bool = False,
+      debug_log_interval: int = 100,
   ):
     self._return_buckets_values = return_buckets_values
     self.predict_fn = predict_fn
     self.temperature = temperature
     self._rng = np.random.default_rng()
+    self.reference_predict_fn = reference_predict_fn
+    self.constrained_greedy_k = constrained_greedy_k if constrained_greedy_k is not None else 5
+    self.debug_constrained_greedy = debug_constrained_greedy
+    self.debug_log_interval = debug_log_interval
+    # Debug counters for constrained greedy intruder tracking
+    self._debug_total_positions = 0
+    self._debug_intruder_positions = 0
 
 
 def _update_scores_with_repetitions(
@@ -95,9 +107,83 @@ class ActionValueEngine(NeuralEngine):
     win_probs = np.inner(return_buckets_probs, self._return_buckets_values)
     _update_scores_with_repetitions(board, win_probs)
     sorted_legal_moves = engine.get_ordered_legal_moves(board)
+    
     if self.temperature is not None:
       probs = scipy.special.softmax(win_probs / self.temperature, axis=-1)
       return self._rng.choice(sorted_legal_moves, p=probs)
+    
+    # CONSTRAINED GREEDY ALGORITHM
+    # If reference model is provided, use constrained greedy decoding
+    if self.reference_predict_fn is not None:
+      # Step 1: Compute Q_base from reference model for all legal moves
+      legal_actions = [utils.MOVE_TO_ACTION[x.uci()] for x in sorted_legal_moves]
+      legal_actions = np.array(legal_actions, dtype=np.int32)
+      legal_actions = np.expand_dims(legal_actions, axis=-1)
+      tokenized_fen = tokenizer.tokenize(board.fen()).astype(np.int32)
+      sequences_base = np.stack([tokenized_fen] * len(legal_actions))
+      dummy_return_buckets = np.zeros((len(legal_actions), 1), dtype=np.int32)
+      sequences_base = np.concatenate(
+          [sequences_base, legal_actions, dummy_return_buckets],
+          axis=1,
+      )
+      
+      # Get reference model Q-values
+      ref_return_buckets_log_probs = self.reference_predict_fn(sequences_base)[:, -1]
+      ref_return_buckets_probs = np.exp(ref_return_buckets_log_probs)
+      q_base = np.inner(ref_return_buckets_probs, self._return_buckets_values)
+      
+      # Step 2: Q_online is already computed as win_probs
+      q_online = win_probs
+      
+      # Step 3-4: Identify top-K moves according to Q_base
+      k = min(self.constrained_greedy_k, len(sorted_legal_moves))
+      topk_indices = np.argsort(q_base)[-k:]  # Top-K indices
+      
+      # Step 5-6: Among top-K candidates, pick the one with highest Q_online
+      candidate_q_online = q_online[topk_indices]
+      best_candidate_idx = np.argmax(candidate_q_online)
+      best_index = topk_indices[best_candidate_idx]
+      
+      # DEBUG LOGGING: Track intruder prevention
+      if self.debug_constrained_greedy:
+        # Compute greedy_online_index = argmax over full Q_online
+        greedy_online_index = np.argmax(q_online)
+        constrained_index = best_index
+        
+        # Check if greedy_online_index is inside or outside base top-K
+        greedy_in_topk = greedy_online_index in topk_indices
+        
+        # Check if this is a "saved intruder" case
+        # (greedy_online_index NOT in top-K but has Q_online > Q_online[constrained_index])
+        is_intruder = (not greedy_in_topk and 
+                       q_online[greedy_online_index] > q_online[constrained_index])
+        
+        # Update counters
+        self._debug_total_positions += 1
+        if is_intruder:
+          self._debug_intruder_positions += 1
+        
+        # Periodic logging (every N calls or immediately when intruder detected)
+        if (self._debug_total_positions % self.debug_log_interval == 0 or is_intruder):
+          intruder_rate = (self._debug_intruder_positions / 
+                          self._debug_total_positions * 100) if self._debug_total_positions > 0 else 0.0
+          logging.info(
+              f'constrained_greedy: intruders prevented = {self._debug_intruder_positions} / '
+              f'{self._debug_total_positions} positions ({intruder_rate:.2f}%)'
+          )
+          if is_intruder:
+            greedy_move = sorted_legal_moves[greedy_online_index].uci()
+            constrained_move = sorted_legal_moves[constrained_index].uci()
+            logging.info(
+                f'  Intruder detected: greedy would pick {greedy_move} '
+                f'(Q_online={q_online[greedy_online_index]:.4f}), '
+                f'constrained picks {constrained_move} '
+                f'(Q_online={q_online[constrained_index]:.4f})'
+            )
+      
+      return sorted_legal_moves[best_index]
+    
+    # Standard greedy decoding (original behavior)
     else:
       best_index = np.argmax(win_probs)
       return sorted_legal_moves[best_index]

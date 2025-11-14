@@ -122,33 +122,51 @@ def compute_move_log_probs(
   #
   # The partition function cancels! This makes DPO tractable with action-value models.
 
-  # So we just need to compute Q-values for the specified moves
-  log_probs_list = []
-
-  for i in range(batch_size):
-    pos_tokens = positions[i, :-2]  # Remove action and return tokens
-    action_idx = moves[i]
-
-    # Create input sequence
+  # Compute Q-values for all specified moves
+  # We need to compute Q-values for both chosen and rejected moves to properly normalize
+  # For now, we'll compute Q-values for the moves we need
+  
+  def get_q_value_for_move(pos_tokens, action_idx):
+    """Get Q-value for a specific action."""
     dummy_return = jnp.array([0], dtype=jnp.int32)
     action_token = jnp.array([action_idx], dtype=jnp.int32)
     input_seq = jnp.concatenate([pos_tokens, action_token, dummy_return])
-
+    
     # Get Q-value distribution
+    # The model outputs return distributions at the last position (-1)
     log_dist = predictor.predict(
         params=params,
         targets=input_seq[None, :],
         rng=None
-    )[0, -2]  # [n_atoms]
-
+    )[0, -1]  # [n_atoms] - return distribution at the return token position
+    
     probs = jnp.exp(log_dist)
     q_value = jnp.sum(probs * z_atoms)
-
-    # Log probability (up to partition function)
-    log_prob = q_value / temperature
-    log_probs_list.append(log_prob)
-
-  return jnp.array(log_probs_list)
+    return q_value
+  
+  # Vectorized computation for all moves
+  batch_indices = jnp.arange(batch_size)
+  pos_tokens_batch = positions[:, :-2]  # Remove action and return tokens
+  
+  # Compute Q-values for all moves in batch
+  q_values = []
+  for i in range(batch_size):
+    q_val = get_q_value_for_move(pos_tokens_batch[i], moves[i])
+    q_values.append(q_val)
+  q_values = jnp.array(q_values)
+  
+  # CRITICAL FIX: We need to normalize properly to get log probabilities
+  # Since we don't have all legal moves, we use a temperature-scaled Q-value
+  # but add a regularization term to prevent drift
+  # The key insight: log π(a|s) = Q(s,a)/τ - log Z(s)
+  # In DPO, we compute log π(chosen) - log π(rejected) = [Q(chosen) - Q(rejected)]/τ
+  # The partition function cancels, BUT we need to ensure Q-values don't drift
+  
+  # Return temperature-scaled Q-values (the partition function will cancel in DPO loss)
+  # BUT we'll add regularization in the loss function to prevent drift
+  log_probs = q_values / temperature
+  
+  return log_probs
 
 
 def dpo_loss(
@@ -162,6 +180,7 @@ def dpo_loss(
     beta: float = 0.1,
     temperature: float = 1.0,
     kl_penalty: float = 0.0,
+    q_preservation_weight: float = 0.01,
 ) -> tuple[jnp.ndarray, dict]:
   """Computes DPO loss for preference pairs with optional KL anchor.
 
@@ -180,6 +199,8 @@ def dpo_loss(
     beta: KL penalty coefficient (default 0.1).
     temperature: Temperature for action selection (default 1.0).
     kl_penalty: Weight for explicit KL anchor to reference (default 0.0).
+    q_preservation_weight: Weight for Q-value preservation regularization to prevent
+      pessimistic drift (default 0.01). Increase if Q-values drift downward.
 
   Returns:
     Tuple of (loss, metrics_dict) where metrics contains:
@@ -223,6 +244,39 @@ def dpo_loss(
   logits = beta * (r_chosen - r_rejected)
   dpo_loss_value = -jax.nn.log_sigmoid(logits).mean()
 
+  # CRITICAL FIX: Add Q-value preservation regularization to prevent pessimistic drift
+  # The problem: Without normalization, the model can satisfy DPO by making all Q-values
+  # smaller (as long as chosen > rejected). This causes:
+  # 1. Pessimistic drift (all Q-values trend downward)
+  # 2. Wrong rankings (moves not in training pairs can rank above chosen moves)
+  # 
+  # Solution: Add a regularization term that encourages the chosen move's Q-value
+  # to stay close to the reference model's Q-value. This prevents drift while
+  # still allowing the model to learn preferences.
+  
+  # Recover raw Q-values from temperature-scaled log probabilities
+  # log_pi = Q / temperature, so Q = log_pi * temperature
+  online_chosen_q = log_pi_chosen * temperature
+  ref_chosen_q = log_ref_chosen * temperature
+  
+  # Q-value preservation loss: penalize deviation from reference Q-values
+  # This prevents the model from making all Q-values smaller
+  # We use L2 loss on the chosen move's Q-value to keep it close to reference
+  q_preservation_loss_chosen = jnp.mean((online_chosen_q - ref_chosen_q) ** 2)
+  
+  # ENHANCEMENT: Also constrain rejected move to prevent overall scale drift
+  # If rejected drifts too far, it can cause other moves to jump above chosen
+  online_rejected_q = log_pi_rejected * temperature
+  ref_rejected_q = log_ref_rejected * temperature
+  q_preservation_loss_rejected = jnp.mean((online_rejected_q - ref_rejected_q) ** 2)
+  
+  # Combined preservation loss (weight chosen more heavily since it's the target)
+  q_preservation_loss = 0.7 * q_preservation_loss_chosen + 0.3 * q_preservation_loss_rejected
+  
+  # q_preservation_weight is now a parameter (default 0.01)
+  # Higher = stronger constraint to prevent drift
+  # Start with 0.01, increase to 0.05-0.1 if drift persists
+  
   # Optional KL anchor: explicit penalty to stay close to reference
   # KL(π_θ || π_ref) ≈ E[log π_θ(a|s) - log π_ref(a|s)]
   # Average KL over both chosen and rejected moves
@@ -230,8 +284,8 @@ def dpo_loss(
   kl_rejected = log_pi_rejected - log_ref_rejected
   kl_divergence = 0.5 * (kl_chosen.mean() + kl_rejected.mean())
 
-  # Total loss with optional KL anchor
-  total_loss = dpo_loss_value
+  # Total loss with Q-value preservation and optional KL anchor
+  total_loss = dpo_loss_value + q_preservation_weight * q_preservation_loss
   if kl_penalty > 0.0:
     total_loss = total_loss + kl_penalty * kl_divergence
 
@@ -242,15 +296,22 @@ def dpo_loss(
   metrics = {
       'dpo_loss': dpo_loss_value,
       'kl_loss': kl_divergence,
+      'q_preservation_loss': q_preservation_loss,
+      'q_preservation_loss_chosen': q_preservation_loss_chosen,
+      'q_preservation_loss_rejected': q_preservation_loss_rejected,
       'total_loss': total_loss,
       'reward_accuracy': reward_accuracy,
       'reward_margin': reward_margin,
+      'online_chosen_q_mean': jnp.mean(online_chosen_q),
+      'ref_chosen_q_mean': jnp.mean(ref_chosen_q),
+      'online_rejected_q_mean': jnp.mean(online_rejected_q),
+      'ref_rejected_q_mean': jnp.mean(ref_rejected_q),
   }
 
   return total_loss, metrics
 
 
-def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0.0):
+def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0.0, q_preservation_weight=0.01):
   """Creates a DPO loss function.
 
   Args:
@@ -259,6 +320,7 @@ def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0
     beta: KL penalty coefficient.
     temperature: Temperature for action selection.
     kl_penalty: Weight for explicit KL anchor to reference (default 0.0).
+    q_preservation_weight: Weight for Q-value preservation regularization (default 0.01).
 
   Returns:
     Loss function that takes (online_params, reference_params, batch).
@@ -275,6 +337,7 @@ def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0
         beta=beta,
         temperature=temperature,
         kl_penalty=kl_penalty,
+        q_preservation_weight=q_preservation_weight,
     )
 
   return loss_fn

@@ -121,6 +121,20 @@ _DPO_TEMPERATURE = flags.DEFINE_float(
     'Temperature for DPO probability computation.',
 )
 
+_Q_PRESERVATION_WEIGHT = flags.DEFINE_float(
+    'q_preservation_weight',
+    0.01,
+    'Weight for Q-value preservation regularization to prevent pessimistic drift. '
+    'Increase (0.05-0.1) if Q-values trend downward during training.',
+)
+
+_CONSTRAINED_GREEDY_K = flags.DEFINE_integer(
+    'constrained_greedy_k',
+    5,
+    'Number of top-K moves from base model to consider in constrained greedy decoding. '
+    'Set to 0 to disable constrained greedy (use standard greedy).',
+)
+
 _SAVE_FREQUENCY = flags.DEFINE_integer(
     'save_frequency',
     1,
@@ -199,8 +213,8 @@ def _load_base_model(model_name: str) -> tuple[hk.Params, transformer.Transforme
   return params, config
 
 
-def _make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0.0):
-  """Creates a DPO loss function with optional KL anchor.
+def _make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0.0, q_preservation_weight=0.01):
+  """Creates a DPO loss function with optional KL anchor and Q-value preservation.
 
   DPO directly optimizes the model to prefer better moves (from Stockfish)
   over worse moves (the model's own mistakes) without needing a separate
@@ -212,6 +226,8 @@ def _make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=
     beta: KL penalty coefficient (default 0.1).
     temperature: Temperature for action selection (default 1.0).
     kl_penalty: Weight for explicit KL anchor (default 0.0).
+    q_preservation_weight: Weight for Q-value preservation to prevent pessimistic
+      drift (default 0.01). Increase if Q-values trend downward during training.
 
   Returns:
     Loss function that takes (online_params, reference_params, batch_data).
@@ -240,6 +256,7 @@ def _make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=
         beta=beta,
         temperature=temperature,
         kl_penalty=kl_penalty,
+        q_preservation_weight=q_preservation_weight,
     )
 
   return loss_fn
@@ -256,6 +273,8 @@ def main(argv: Sequence[str]) -> None:
   logging.info(f'Stockfish depth: {_STOCKFISH_DEPTH.value}')
   logging.info(f'Eval threshold: {_EVAL_THRESHOLD.value} pawns')
   logging.info(f'DPO beta: {_BETA.value}')
+  logging.info(f'Q-preservation weight: {_Q_PRESERVATION_WEIGHT.value} (prevents pessimistic drift)')
+  logging.info(f'Constrained greedy K: {_CONSTRAINED_GREEDY_K.value} (0 = disabled)')
 
   # Load base model
   params, config = _load_base_model(_BASE_MODEL.value)
@@ -353,7 +372,8 @@ def main(argv: Sequence[str]) -> None:
       z_atoms,
       beta=_BETA.value,
       temperature=_DPO_TEMPERATURE.value,
-      kl_penalty=0.0  # Start at 0.0, increase if drift occurs
+      kl_penalty=0.0,  # Start at 0.0. If other moves still drift, try 0.01-0.05
+      q_preservation_weight=_Q_PRESERVATION_WEIGHT.value,  # Prevent Q-value drift (constrains both chosen & rejected)
   )
 
   # Wrapper to extract loss for gradient computation
@@ -505,17 +525,34 @@ def main(argv: Sequence[str]) -> None:
     # Create neural engine with current parameters
     # Un-shard params for inference
     local_params = jax.device_get(params_ema)
+    local_reference_params = jax.device_get(reference_params)
 
-    # Use ActionValueEngine with greedy play (temperature=None) for deterministic games
-    neural_engine = neural_engines.ActionValueEngine(
-        return_buckets_values=return_buckets_values,
-        predict_fn=neural_engines.wrap_predict_fn(
+    # Use ActionValueEngine with constrained greedy decoding (if enabled)
+    # This prevents the model from choosing moves that were low-ranked in the base model
+    # Example: e2c2 (rank 14) cannot be chosen even if it has high Q_online
+    engine_kwargs = {
+        'return_buckets_values': return_buckets_values,
+        'predict_fn': neural_engines.wrap_predict_fn(
             predictor=predictor,
             params=local_params,
             batch_size=1,
         ),
-        temperature=None,  # Greedy play - always pick best move
-    )
+        'temperature': None,  # Greedy play - always pick best move
+    }
+    
+    # Add constrained greedy if K > 0
+    if _CONSTRAINED_GREEDY_K.value > 0:
+        engine_kwargs['reference_predict_fn'] = neural_engines.wrap_predict_fn(
+            predictor=predictor,
+            params=local_reference_params,
+            batch_size=1,
+        )
+        engine_kwargs['constrained_greedy_k'] = _CONSTRAINED_GREEDY_K.value
+        logging.info(f'Using constrained greedy decoding (K={_CONSTRAINED_GREEDY_K.value})')
+    else:
+        logging.info('Using standard greedy decoding (constrained greedy disabled)')
+    
+    neural_engine = neural_engines.ActionValueEngine(**engine_kwargs)
 
     # Generate self-play games and create preference pairs using DPO
     generator = dpo_generator.DPOSelfPlayGenerator(
@@ -615,7 +652,9 @@ def main(argv: Sequence[str]) -> None:
             f'loss={float(loss_val):.4f}, grad_norm={float(grad_norm):.4f}, '
             f'reward_acc={float(metrics["reward_accuracy"]):.3f}, '
             f'reward_margin={float(metrics["reward_margin"]):.3f}, '
-            f'kl={float(metrics["kl_loss"]):.4f}'
+            f'kl={float(metrics["kl_loss"]):.4f}, '
+            f'q_preserve={float(metrics.get("q_preservation_loss", 0.0)):.4f}, '
+            f'q_chosen={float(metrics.get("online_chosen_q_mean", 0.0)):.4f}'
         )
 
     # Update cache files after successful training
