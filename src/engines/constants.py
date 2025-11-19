@@ -221,17 +221,21 @@ ENGINE_BUILDERS = {
     '270M_selfplay_iter3': lambda: _build_selfplay_engine('270M', iteration=3),
     '270M_selfplay_iter4': lambda: _build_selfplay_engine('270M', iteration=4),
     '270M_selfplay_iter5': lambda: _build_selfplay_engine('270M', iteration=5),
-    # Lichess DPO-trained models (9M) - checkpoints named by pairs trained
-    '9M_lichess_100k': lambda: _build_selfplay_engine('9M', iteration='100000', training_type='lichess'),
-    '9M_lichess_200k': lambda: _build_selfplay_engine('9M', iteration='200000', training_type='lichess'),
-    '9M_lichess_300k': lambda: _build_selfplay_engine('9M', iteration='300000', training_type='lichess'),
-    '9M_lichess_400k': lambda: _build_selfplay_engine('9M', iteration='400000', training_type='lichess'),
-    '9M_lichess_500k': lambda: _build_selfplay_engine('9M', iteration='500000', training_type='lichess'),
-    '9M_lichess_600k': lambda: _build_selfplay_engine('9M', iteration='600000', training_type='lichess'),
-    '9M_lichess_700k': lambda: _build_selfplay_engine('9M', iteration='700000', training_type='lichess'),
-    '9M_lichess_800k': lambda: _build_selfplay_engine('9M', iteration='800000', training_type='lichess'),
-    '9M_lichess_900k': lambda: _build_selfplay_engine('9M', iteration='900000', training_type='lichess'),
-    '9M_lichess_1000k': lambda: _build_selfplay_engine('9M', iteration='1000000', training_type='lichess'),
+    # Lichess DPO-trained models (9M) - checkpoints named by actual pairs trained
+    # New checkpoints (every 10k pairs with Q-value anchoring + dynamic pairs)
+    '9M_lichess_10k': lambda: _build_selfplay_engine('9M', iteration='10016', training_type='lichess'),
+    '9M_lichess_50k': lambda: _build_selfplay_engine('9M', iteration='50080', training_type='lichess'),
+    '9M_lichess_100k': lambda: _build_selfplay_engine('9M', iteration='100160', training_type='lichess'),
+    '9M_lichess_200k': lambda: _build_selfplay_engine('9M', iteration='200320', training_type='lichess'),
+    '9M_lichess_300k': lambda: _build_selfplay_engine('9M', iteration='300480', training_type='lichess'),
+    '9M_lichess_400k': lambda: _build_selfplay_engine('9M', iteration='400640', training_type='lichess'),
+    '9M_lichess_500k': lambda: _build_selfplay_engine('9M', iteration='500800', training_type='lichess'),
+    '9M_lichess_600k': lambda: _build_selfplay_engine('9M', iteration='600960', training_type='lichess'),
+    '9M_lichess_700k': lambda: _build_selfplay_engine('9M', iteration='701120', training_type='lichess'),
+    '9M_lichess_800k': lambda: _build_selfplay_engine('9M', iteration='801280', training_type='lichess'),
+    '9M_lichess_900k': lambda: _build_selfplay_engine('9M', iteration='901440', training_type='lichess'),
+    '9M_lichess_1000k': lambda: _build_selfplay_engine('9M', iteration='1001600', training_type='lichess'),
+    '9M_lichess_1100k': lambda: _build_selfplay_engine('9M', iteration='1103953', training_type='lichess'),
     # Legacy/old iteration names (kept for backwards compatibility)
     '9M_lichess_best': lambda: _build_selfplay_engine('9M', iteration='best', training_type='lichess'),
     '9M_lichess': lambda: _build_selfplay_engine('9M', iteration=24, training_type='lichess'),
@@ -258,6 +262,20 @@ ENGINE_BUILDERS = {
     '9M_lichess_iter22': lambda: _build_selfplay_engine('9M', iteration=22, training_type='lichess'),
     '9M_lichess_iter23': lambda: _build_selfplay_engine('9M', iteration=23, training_type='lichess'),
     '9M_lichess_iter24': lambda: _build_selfplay_engine('9M', iteration=24, training_type='lichess'),
+    # Stream-trained models (9M) - new training approach with Q-value anchoring + dynamic pairs
+    # All 85 checkpoints generated programmatically
+    **{f'9M_stream_{step}': (lambda s=step: lambda: _build_selfplay_engine('9M', iteration=s, training_type='stream'))()
+       for step in ['1002', '2039', '3102', '4259', '5360', '6380', '7398', '8423', '9487',
+                    '10529', '11646', '12775', '13899', '14945', '15985', '16995', '18153',
+                    '19225', '20367', '21381', '22423', '23543', '24547', '25606', '26669',
+                    '27695', '28789', '29842', '30899', '31944', '32991', '34031', '35162',
+                    '36254', '37305', '38354', '39498', '40675', '41786', '42847', '43911',
+                    '44954', '46058', '47215', '48378', '49513', '50643', '51653', '52701',
+                    '53718', '54744', '55872', '56890', '57991', '59019', '60027', '61076',
+                    '62081', '63160', '64250', '65281', '66422', '67614', '68764', '69824',
+                    '70906', '71968', '72970', '74014', '75149', '76218', '77300', '78361',
+                    '79463', '80625', '81908', '82942', '84119', '85175', '86253', '87297',
+                    '88298', '89396', '90411', '91526']},
     'stockfish': lambda: stockfish_engine.StockfishEngine(
         limit=chess.engine.Limit(time=0.05)
     ),
