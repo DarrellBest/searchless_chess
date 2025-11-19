@@ -159,15 +159,33 @@ def dpo_loss(
     chosen_moves: jnp.ndarray,
     rejected_moves: jnp.ndarray,
     z_atoms: jnp.ndarray,
-    beta: float = 0.1,
+    beta: float = 10.0,
     temperature: float = 1.0,
-    kl_penalty: float = 0.0,
+    anchor_weight: float = 0.0,
 ) -> tuple[jnp.ndarray, dict]:
-  """Computes DPO loss for preference pairs with optional KL anchor.
+  """Computes DPO loss for preference pairs with Q-value anchoring.
 
   The loss encourages the model to assign higher probability to chosen moves
   (from Stockfish) compared to rejected moves (model's mistakes), relative
-  to a reference model.
+  to a reference model. Q-value anchoring prevents absolute Q-value drift by
+  penalizing squared deviation from reference Q-values.
+
+  IMPORTANT - Beta Scaling for Chess Q-Values:
+    Chess Q-values are in range [-0.3, 0.3], much smaller than language model
+    log probabilities (typically -5 to -15). With typical Q-value differences
+    of ~0.1 and beta=0.1:
+      - logits = 0.1 * 0.1 = 0.01  (too small!)
+      - sigmoid(0.01) ≈ 0.5025     (only 50% preference)
+
+    For strong preference signals, use beta = 5.0-20.0:
+      - logits = 10.0 * 0.1 = 1.0  (strong signal)
+      - sigmoid(1.0) ≈ 0.73        (73% preference)
+
+  IMPORTANT - Q-Value Anchoring:
+    DPO loss is invariant to shifting all Q-values by a constant, which can
+    cause absolute Q-value drift (both chosen/rejected drop while random moves
+    drift upward). Anchoring prevents this by penalizing squared Q-value
+    deviation from the reference model. Recommended: anchor_weight = 0.5-2.0.
 
   Args:
     online_params: Current model parameters.
@@ -177,17 +195,21 @@ def dpo_loss(
     chosen_moves: [batch_size] Better move indices (Stockfish).
     rejected_moves: [batch_size] Worse move indices (model's moves).
     z_atoms: [n_atoms] Support atoms for Q-value distributions.
-    beta: KL penalty coefficient (default 0.1).
+    beta: KL penalty coefficient (default 10.0 for chess Q-values).
     temperature: Temperature for action selection (default 1.0).
-    kl_penalty: Weight for explicit KL anchor to reference (default 0.0).
+    anchor_weight: Weight for Q-value anchoring to reference (default 0.0).
 
   Returns:
     Tuple of (loss, metrics_dict) where metrics contains:
       - dpo_loss: Base DPO loss
-      - kl_loss: KL divergence to reference
+      - anchor_loss: Q-value anchoring loss
       - total_loss: Combined loss
       - reward_accuracy: % where chosen > rejected
       - reward_margin: Average log prob margin
+      - q_chosen_mean/q_rejected_mean/q_diff_mean: Q-value diagnostics
+      - q_all_mean/q_all_std: Overall Q-value statistics
+      - q_ref_all_mean/q_ref_all_std: Reference Q-value statistics
+      - logits_mean: Average DPO logits (beta * Q-diff)
   """
   # Compute log probabilities from online model
   log_pi_chosen = compute_move_log_probs(
@@ -223,42 +245,60 @@ def dpo_loss(
   logits = beta * (r_chosen - r_rejected)
   dpo_loss_value = -jax.nn.log_sigmoid(logits).mean()
 
-  # Optional KL anchor: explicit penalty to stay close to reference
-  # KL(π_θ || π_ref) ≈ E[log π_θ(a|s) - log π_ref(a|s)]
-  # Average KL over both chosen and rejected moves
-  kl_chosen = log_pi_chosen - log_ref_chosen
-  kl_rejected = log_pi_rejected - log_ref_rejected
-  kl_divergence = 0.5 * (kl_chosen.mean() + kl_rejected.mean())
+  # Q-value anchoring: Penalize squared deviation from reference Q-values
+  # This prevents absolute Q-value drift while learning relative preferences
+  # Extract Q-values from log-probs (log_prob = Q/temperature)
+  q_chosen = log_pi_chosen * temperature
+  q_rejected = log_pi_rejected * temperature
+  q_ref_chosen = log_ref_chosen * temperature
+  q_ref_rejected = log_ref_rejected * temperature
 
-  # Total loss with optional KL anchor
+  anchor_loss_chosen = jnp.square(q_chosen - q_ref_chosen).mean()
+  anchor_loss_rejected = jnp.square(q_rejected - q_ref_rejected).mean()
+  anchor_loss = anchor_loss_chosen + anchor_loss_rejected
+
+  # Total loss with optional anchoring
   total_loss = dpo_loss_value
-  if kl_penalty > 0.0:
-    total_loss = total_loss + kl_penalty * kl_divergence
+  if anchor_weight > 0.0:
+    total_loss = total_loss + anchor_weight * anchor_loss
 
   # Compute metrics for monitoring
   reward_accuracy = (r_chosen > r_rejected).astype(jnp.float32).mean()
   reward_margin = (r_chosen - r_rejected).mean()
 
+  # Q-value statistics
+  q_diff = q_chosen - q_rejected
+  q_all = jnp.concatenate([q_chosen, q_rejected])
+  q_ref_all = jnp.concatenate([q_ref_chosen, q_ref_rejected])
+
   metrics = {
       'dpo_loss': dpo_loss_value,
-      'kl_loss': kl_divergence,
+      'anchor_loss': anchor_loss,
       'total_loss': total_loss,
       'reward_accuracy': reward_accuracy,
       'reward_margin': reward_margin,
+      'q_chosen_mean': q_chosen.mean(),
+      'q_rejected_mean': q_rejected.mean(),
+      'q_diff_mean': q_diff.mean(),
+      'q_all_mean': q_all.mean(),
+      'q_all_std': q_all.std(),
+      'q_ref_all_mean': q_ref_all.mean(),
+      'q_ref_all_std': q_ref_all.std(),
+      'logits_mean': logits.mean(),
   }
 
   return total_loss, metrics
 
 
-def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0.0):
+def make_dpo_loss_fn(predictor, z_atoms, beta=10.0, temperature=1.0, anchor_weight=0.0):
   """Creates a DPO loss function.
 
   Args:
     predictor: Transformer predictor function.
     z_atoms: Support atoms for Q-value distributions.
-    beta: KL penalty coefficient.
+    beta: KL penalty coefficient (default 10.0 for chess Q-values).
     temperature: Temperature for action selection.
-    kl_penalty: Weight for explicit KL anchor to reference (default 0.0).
+    anchor_weight: Weight for Q-value anchoring to reference (default 0.0).
 
   Returns:
     Loss function that takes (online_params, reference_params, batch).
@@ -274,7 +314,7 @@ def make_dpo_loss_fn(predictor, z_atoms, beta=0.1, temperature=1.0, kl_penalty=0
         z_atoms=z_atoms,
         beta=beta,
         temperature=temperature,
-        kl_penalty=kl_penalty,
+        anchor_weight=anchor_weight,
     )
 
   return loss_fn

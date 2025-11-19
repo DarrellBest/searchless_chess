@@ -10,14 +10,19 @@ BASE_MODEL="9M"
 NUM_ITERATIONS=-1  # -1 = train until early stopping or data exhaustion
 PAIRS_PER_ITERATION=10000
 BATCH_SIZE=32
+PAIRS_PER_UPDATE=1000  # Number of pairs to accumulate before training update
+TRAIN_MINI_BATCH=128  # Mini-batch size for gradient accumulation (prevents OOM)
 LEARNING_RATE=0.000002
 GRADIENT_STEPS=-1
-BETA=0.1
+BETA=10.0  # Chess Q-values (~0.3) need much higher beta than LM log probs
 TEMPERATURE=1.0
 MAX_GRAD_NORM=1.0
 UPDATE_REF_EVERY=1
 MAX_KL_DIVERGENCE=0.5
-CHECKPOINT_EVERY=100000
+ANCHOR_WEIGHT=1.0  # Q-value anchoring to prevent drift (0.5-2.0 recommended)
+DYNAMIC_PAIRS=true  # Enable ONLY dynamic pairs mode (trains on intruders only)
+DYNAMIC_PAIRS_MAX_PER_POS=-1  # Max dynamic pairs to generate per position (-1 = unlimited, use all intruders)
+CHECKPOINT_EVERY=10000  # Checkpoints saved after each training update (pairs_per_update)
 MAX_PAIRS=-1  # -1 = unlimited, otherwise max number of pairs to generate
 LICHESS_DB_PATH="../data/lichess_db_eval.jsonl.zst"
 NUM_PUZZLES=100
@@ -58,6 +63,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --batch_size)
       BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --pairs_per_update=*)
+      PAIRS_PER_UPDATE="${1#*=}"
+      shift
+      ;;
+    --pairs_per_update)
+      PAIRS_PER_UPDATE="$2"
       shift 2
       ;;
     --learning_rate=*)
@@ -140,6 +153,30 @@ while [[ $# -gt 0 ]]; do
       MAX_PAIRS="$2"
       shift 2
       ;;
+    --anchor_weight=*)
+      ANCHOR_WEIGHT="${1#*=}"
+      shift
+      ;;
+    --anchor_weight)
+      ANCHOR_WEIGHT="$2"
+      shift 2
+      ;;
+    --dynamic_pairs)
+      DYNAMIC_PAIRS=true
+      shift
+      ;;
+    --no_dynamic_pairs)
+      DYNAMIC_PAIRS=false
+      shift
+      ;;
+    --dynamic_pairs_max_per_pos=*)
+      DYNAMIC_PAIRS_MAX_PER_POS="${1#*=}"
+      shift
+      ;;
+    --dynamic_pairs_max_per_pos)
+      DYNAMIC_PAIRS_MAX_PER_POS="$2"
+      shift 2
+      ;;
     --skip_baseline)
       SKIP_BASELINE=true
       shift
@@ -159,27 +196,48 @@ while [[ $# -gt 0 ]]; do
     --help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
-      echo "Options:"
-      echo "  --base_model MODEL           Base model (9M, 136M, 270M) [default: 9M]"
-      echo "  --batch_size N               Training batch size [default: 32]"
-      echo "  --learning_rate LR           Learning rate [default: 0.000002]"
-      echo "  --beta BETA                  DPO KL penalty coefficient [default: 0.1]"
-      echo "  --temperature TEMP           Policy extraction temperature [default: 1.0]"
-      echo "  --max_grad_norm NORM         Maximum gradient norm [default: 1.0]"
-      echo "  --max_kl_divergence KL       Early stop if KL > threshold [default: 0.5]"
-      echo "  --checkpoint_every N         Save checkpoint every N pairs [default: 100000]"
-      echo "  --max_pairs N                Max pairs to generate (-1=unlimited) [default: -1]"
-      echo "  --lichess_db_path PATH       Path to Lichess database [default: ../data/lichess_db_eval.jsonl.zst]"
-      echo "  --skip_baseline              Skip baseline evaluation (if already done)"
-      echo "  --run_hypertest              Run hyperparameter testing before training"
-      echo "  --help                       Show this help message"
+      echo "Core Options:"
+      echo "  --base_model MODEL              Base model (9M, 136M, 270M) [default: 9M]"
+      echo "  --batch_size N                  Position batch size for pair generation [default: 32]"
+      echo "  --pairs_per_update N            Pairs to accumulate before training update [default: 1000]"
+      echo "  --learning_rate LR              Learning rate [default: 0.000002]"
+      echo "  --beta BETA                     DPO KL penalty coefficient [default: 10.0]"
+      echo "  --temperature TEMP              Policy extraction temperature [default: 1.0]"
+      echo "  --max_grad_norm NORM            Maximum gradient norm [default: 1.0]"
+      echo "  --max_kl_divergence KL          Early stop if KL > threshold [default: 0.5]"
       echo ""
-      echo "Note: Training processes Lichess database (up to max_pairs if set)."
-      echo "      DPO pairs are cached per model for faster subsequent runs."
+      echo "Q-Value Anchoring (prevents drift):"
+      echo "  --anchor_weight WEIGHT          Anchoring strength (0.0=off, 0.5-2.0 recommended) [default: 1.0]"
+      echo ""
+      echo "Dynamic Pair Generation (ONLY mode - trains on intruders only):"
+      echo "  --dynamic_pairs                 Enable ONLY dynamic pairs mode [default: enabled]"
+      echo "  --no_dynamic_pairs              Disable (use static pairs - legacy mode)"
+      echo "  --dynamic_pairs_max_per_pos N   Max pairs per position (-1=unlimited) [default: -1]"
+      echo ""
+      echo "Training Control:"
+      echo "  --checkpoint_every N            Save checkpoint every N pairs [default: 10000]"
+      echo "  --max_pairs N                   Max pairs to generate (-1=unlimited) [default: -1]"
+      echo "  --lichess_db_path PATH          Path to Lichess database"
+      echo ""
+      echo "Evaluation Options:"
+      echo "  --skip_baseline                 Skip baseline evaluation (if already done)"
+      echo "  --run_hypertest                 Run hyperparameter testing before training"
+      echo ""
+      echo "Other:"
+      echo "  --help                          Show this help message"
+      echo ""
+      echo "Note: Training streams positions from Lichess database."
+      echo "      Pairs are generated dynamically on-the-fly and used once."
       echo ""
       echo "Examples:"
+      echo "  # Standard training with anchoring and dynamic pairs (recommended)"
       echo "  $0 --base_model=9M --max_pairs=1000000"
-      echo "  $0 --base_model=9M --checkpoint_every=5000"
+      echo ""
+      echo "  # Conservative anchoring, no dynamic pairs"
+      echo "  $0 --anchor_weight=0.5 --no_dynamic_pairs --max_pairs=500000"
+      echo ""
+      echo "  # Aggressive dynamic pair generation"
+      echo "  $0 --dynamic_pairs_max_per_pos=5"
       exit 0
       ;;
     *)
@@ -198,21 +256,45 @@ echo ""
 echo "Configuration:"
 echo "  Base Model: $BASE_MODEL"
 if [ "$MAX_PAIRS" -eq -1 ]; then
-  echo "  Training: Process entire Lichess database in one pass"
+  echo "  Training: Unlimited pairs (trains until KL threshold or data exhaustion)"
 else
-  echo "  Training: Generate up to $MAX_PAIRS DPO pairs"
+  echo "  Training: Up to $MAX_PAIRS DPO pairs"
 fi
-echo "  Batch Size: $BATCH_SIZE"
+echo ""
+echo "Training Parameters:"
+echo "  Batch Size (positions): $BATCH_SIZE"
+echo "  Pairs Per Update: $PAIRS_PER_UPDATE"
 echo "  Learning Rate: $LEARNING_RATE"
 echo "  DPO Beta: $BETA"
 echo "  Temperature: $TEMPERATURE"
 echo "  Max Gradient Norm: $MAX_GRAD_NORM"
 echo "  Max KL Divergence: $MAX_KL_DIVERGENCE"
+echo ""
+echo "Q-Value Anchoring:"
+echo "  Anchor Weight: $ANCHOR_WEIGHT (prevents Q-value drift)"
+echo ""
+echo "Dynamic Pair Generation:"
+echo "  Enabled: $DYNAMIC_PAIRS"
+if [ "$DYNAMIC_PAIRS" = true ]; then
+  echo "  Mode: ONLY dynamic pairs (trains on intruders only)"
+  if [ "$DYNAMIC_PAIRS_MAX_PER_POS" -le 0 ]; then
+    echo "  Pairs per Position: Unlimited (all intruders)"
+  else
+    echo "  Max Pairs per Position: $DYNAMIC_PAIRS_MAX_PER_POS"
+  fi
+else
+  echo "  Mode: Static pairs (legacy mode)"
+fi
+echo ""
+echo "Checkpointing:"
 echo "  Checkpoint Every: $CHECKPOINT_EVERY pairs"
 echo "  Lichess DB Path: $LICHESS_DB_PATH"
-echo "  Evaluation Puzzles (baseline/final): $NUM_PUZZLES"
 echo ""
-echo "Note: DPO pairs will be cached per model for fast subsequent runs"
+echo "Evaluation:"
+echo "  Puzzles (baseline/final): $NUM_PUZZLES"
+echo ""
+echo "Note: Streaming training - positions used once, pairs generated on-the-fly"
+echo "      Q-value anchoring + dynamic pairs prevent intruder moves from getting higher Q-values"
 echo ""
 
 # Activate conda environment
@@ -285,21 +367,34 @@ echo "=========================================="
 echo "Training ${BASE_MODEL} with Lichess evaluations..."
 echo ""
 
-# Build training command (simplified - new script only supports these flags)
-TRAIN_CMD="python lichess_train.py \
+# Build training command with Q-value anchoring and streaming dynamic pairs
+TRAIN_CMD="python lichess_stream_train.py \
   --base_model=$BASE_MODEL \
   --batch_size=$BATCH_SIZE \
+  --pairs_per_update=$PAIRS_PER_UPDATE \
+  --train_mini_batch=$TRAIN_MINI_BATCH \
   --learning_rate=$LEARNING_RATE \
   --beta=$BETA \
   --temperature=$TEMPERATURE \
   --max_grad_norm=$MAX_GRAD_NORM \
   --max_kl_divergence=$MAX_KL_DIVERGENCE \
+  --anchor_weight=$ANCHOR_WEIGHT \
+  --dynamic_pairs_max_per_pos=$DYNAMIC_PAIRS_MAX_PER_POS \
   --checkpoint_every=$CHECKPOINT_EVERY \
-  --max_pairs=$MAX_PAIRS \
   --lichess_db_path=$LICHESS_DB_PATH"
 
-# Note: The new training script processes the database (up to max_pairs if set)
-# It will generate/load DPO pairs cache and train until completion
+# Add max_positions if max_pairs is set (approximate: 1000 pairs ≈ 1000 positions if we get ~1 pair/position)
+if [ "$MAX_PAIRS" -ne -1 ]; then
+  # Estimate positions needed: max_pairs / avg_pairs_per_position
+  # We generate up to 3 pairs per position, but many positions have 0 intruders
+  # So roughly 1000 pairs ≈ 3000-5000 positions
+  MAX_POSITIONS=$((MAX_PAIRS * 4))
+  TRAIN_CMD="$TRAIN_CMD --max_positions=$MAX_POSITIONS"
+fi
+
+# Note: The streaming training script processes positions from Lichess database
+# It generates dynamic pairs on-the-fly by finding intruder moves
+# Each position is used once then discarded (pairs are ephemeral)
 # Checkpoints are saved every CHECKPOINT_EVERY pairs and named by total pairs trained
 
 # Execute training

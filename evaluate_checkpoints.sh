@@ -8,7 +8,7 @@ set -e  # Exit on error
 # Configuration
 BASE_MODEL="9M"
 NUM_PUZZLES=100
-CHECKPOINT_DIR="../checkpoints/${BASE_MODEL}_lichess"
+CHECKPOINT_DIR="../checkpoints/${BASE_MODEL}_stream"
 RESULTS_DIR="../data/checkpoint_evals"
 
 # Parse command line arguments
@@ -128,38 +128,9 @@ declare -a CHECKPOINT_BUCKET_4
 
 # Evaluate each checkpoint
 for CHECKPOINT in "${CHECKPOINTS[@]}"; do
-  # Map checkpoint number to agent name
-  if [ "$CHECKPOINT" -lt 150000 ]; then
-    AGENT="${BASE_MODEL}_lichess_100k"
-    CHECKPOINT_LABEL="100k"
-  elif [ "$CHECKPOINT" -lt 250000 ]; then
-    AGENT="${BASE_MODEL}_lichess_200k"
-    CHECKPOINT_LABEL="200k"
-  elif [ "$CHECKPOINT" -lt 350000 ]; then
-    AGENT="${BASE_MODEL}_lichess_300k"
-    CHECKPOINT_LABEL="300k"
-  elif [ "$CHECKPOINT" -lt 450000 ]; then
-    AGENT="${BASE_MODEL}_lichess_400k"
-    CHECKPOINT_LABEL="400k"
-  elif [ "$CHECKPOINT" -lt 550000 ]; then
-    AGENT="${BASE_MODEL}_lichess_500k"
-    CHECKPOINT_LABEL="500k"
-  elif [ "$CHECKPOINT" -lt 650000 ]; then
-    AGENT="${BASE_MODEL}_lichess_600k"
-    CHECKPOINT_LABEL="600k"
-  elif [ "$CHECKPOINT" -lt 750000 ]; then
-    AGENT="${BASE_MODEL}_lichess_700k"
-    CHECKPOINT_LABEL="700k"
-  elif [ "$CHECKPOINT" -lt 850000 ]; then
-    AGENT="${BASE_MODEL}_lichess_800k"
-    CHECKPOINT_LABEL="800k"
-  elif [ "$CHECKPOINT" -lt 950000 ]; then
-    AGENT="${BASE_MODEL}_lichess_900k"
-    CHECKPOINT_LABEL="900k"
-  else
-    AGENT="${BASE_MODEL}_lichess_1000k"
-    CHECKPOINT_LABEL="1000k"
-  fi
+  # Map checkpoint number to agent name (for stream checkpoints, use exact number)
+  AGENT="${BASE_MODEL}_stream_${CHECKPOINT}"
+  CHECKPOINT_LABEL="${CHECKPOINT}"
 
   echo "Evaluating checkpoint: $CHECKPOINT ($AGENT)..."
   RESULT_FILE="$RESULTS_DIR/${AGENT}.txt"
