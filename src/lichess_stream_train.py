@@ -56,7 +56,7 @@ _MAX_GRAD_NORM = flags.DEFINE_float('max_grad_norm', 1.0, 'Maximum gradient norm
 _MAX_KL_DIVERGENCE = flags.DEFINE_float('max_kl_divergence', 1.0, 'Stop if KL exceeds this.')
 _ANCHOR_WEIGHT = flags.DEFINE_float('anchor_weight', 0.1, 'Q-value anchoring weight.')
 _DYNAMIC_PAIRS_MAX_PER_POS = flags.DEFINE_integer('dynamic_pairs_max_per_pos', -1, 'Max pairs per position (-1=unlimited).')
-_CHECKPOINT_EVERY = flags.DEFINE_integer('checkpoint_every', 1000, 'Checkpoints saved after each training update.')
+_CHECKPOINT_EVERY = flags.DEFINE_integer('checkpoint_every', 10000, 'Checkpoints saved after each training update.')
 _MAX_POSITIONS = flags.DEFINE_integer('max_positions', -1, 'Max positions to process (-1=unlimited).')
 _LICHESS_DB_PATH = flags.DEFINE_string('lichess_db_path', '../data/lichess_db_eval.jsonl.zst', 'Path to Lichess DB.')
 
